@@ -51,7 +51,6 @@ install_bot() {
     fi
 
     echo -e "${YELLOW}正在拉取最新代码...${NC}"
-    # 请确保将 ike666888 替换为你的 GitHub 用户名
     curl -o $WORK_DIR/bot.py https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/bot.py
 
     chmod +x "$WORK_DIR/bot.py"
