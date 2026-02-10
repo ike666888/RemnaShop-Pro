@@ -17,7 +17,7 @@ fi
 show_menu() {
     clear
     echo -e "${GREEN}=============================================${NC}"
-    echo -e "${GREEN}       RemnaShop-Pro 管理脚本 V2.1           ${NC}"
+    echo -e "${GREEN}        RemnaShop-Pro 管理脚本 V1.2          ${NC}"
     echo -e "${GREEN}=============================================${NC}"
     echo -e "1. 🛠  安装 / 更新 (保留数据库)"
     echo -e "2. 🗑  卸载全部 (删除数据)"
@@ -29,46 +29,34 @@ show_menu() {
 install_bot() {
     echo -e "${YELLOW}>>> 开始安装流程...${NC}"
 
-    # 1. 环境检查与安装 (修复 pip3 缺失问题)
     echo -e "${YELLOW}正在检查环境依赖...${NC}"
-    
-    # 更新软件源
     if [ ! -f "/var/lib/apt/lists/lock" ]; then
         apt-get update -y
     fi
-
-    # 检查并安装 Python3
     if ! command -v python3 &> /dev/null; then
         echo -e "${YELLOW}未检测到 Python3，正在安装...${NC}"
         apt-get install -y python3
     fi
-
-    # 🟢 修复核心：单独检查并安装 pip3
     if ! command -v pip3 &> /dev/null; then
         echo -e "${YELLOW}未检测到 pip3，正在安装...${NC}"
         apt-get install -y python3-pip
     fi
 
-    # 2. 依赖安装
     echo -e "${YELLOW}正在安装/更新 Python 依赖...${NC}"
-    pip3 install python-telegram-bot[job-queue] requests --break-system-packages
+    pip3 install python-telegram-bot[job-queue] requests httpx qrcode[pil] --break-system-packages
 
-    # 3. 创建目录
     if [ ! -d "$WORK_DIR" ]; then
         mkdir -p "$WORK_DIR"
         echo -e "${GREEN}目录已创建: $WORK_DIR${NC}"
     fi
 
-    # 4. 下载代码
     echo -e "${YELLOW}正在拉取最新代码...${NC}"
-    # 替换为你的 GitHub 用户名
+    # 请确保将 ike666888 替换为你的 GitHub 用户名
     curl -o $WORK_DIR/bot.py https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/bot.py
 
-    # 5. 自动赋权
     chmod +x "$WORK_DIR/bot.py"
     echo -e "${GREEN}已赋予脚本执行权限。${NC}"
 
-    # 6. 配置录入
     if [ ! -f "$WORK_DIR/config.json" ]; then
         echo -e "${YELLOW}>>> 检测到首次运行，请配置参数:${NC}"
         read -p "请输入管理员 TG ID (数字): " ADMIN_ID
@@ -93,7 +81,6 @@ EOF
         echo -e "${YELLOW}检测到配置文件已存在，跳过配置步骤。${NC}"
     fi
 
-    # 7. 配置 Systemd
     echo -e "${YELLOW}配置后台服务...${NC}"
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -112,15 +99,14 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-    # 8. 启动服务
     systemctl daemon-reload
     systemctl enable remnashop
     systemctl restart remnashop
 
     echo -e "${GREEN}=============================================${NC}"
     echo -e "${GREEN}🎉 安装/更新 完成！${NC}"
-    echo -e "机器人状态: $(systemctl is-active remnashop)"
-    echo -e "查看日志命令: journalctl -u remnashop -f"
+    echo -e "作者：ike"
+    echo -e "交流群组：https://t.me/Remnawarecn"
     echo -e "${GREEN}=============================================${NC}"
 }
 
@@ -135,36 +121,18 @@ uninstall_bot() {
     echo -e "${YELLOW}正在停止服务...${NC}"
     systemctl stop remnashop
     systemctl disable remnashop
-
-    echo -e "${YELLOW}正在删除服务文件...${NC}"
     rm -f "$SERVICE_FILE"
     systemctl daemon-reload
-
-    echo -e "${YELLOW}正在删除项目文件...${NC}"
     rm -rf "$WORK_DIR"
-
     echo -e "${GREEN}✅ 卸载完成。所有痕迹已清理。${NC}"
 }
 
-# 主逻辑
 while true; do
     show_menu
     case $option in
-        1)
-            install_bot
-            break
-            ;;
-        2)
-            uninstall_bot
-            break
-            ;;
-        0)
-            echo "退出。"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}无效选项，请重试。${NC}"
-            sleep 1
-            ;;
+        1) install_bot; break ;;
+        2) uninstall_bot; break ;;
+        0) echo "退出。"; exit 0 ;;
+        *) echo -e "${RED}无效选项，请重试。${NC}"; sleep 1 ;;
     esac
 done
