@@ -30,9 +30,17 @@ install_bot() {
     echo -e "${YELLOW}>>> 开始安装流程...${NC}"
 
     # 1. 环境检查
-    if ! command -v python3 &> /dev/null; then
-        echo -e "${YELLOW}正在安装 Python3...${NC}"
-        apt-get update && apt-get install -y python3 python3-pip
+    # 检查 python3
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo -e "${YELLOW}未检测到 python3，正在安装...${NC}"
+        apt-get update
+        apt-get install -y python3
+    fi
+
+    # 检查 pip（重点）
+    if ! python3 -m pip --version >/dev/null 2>&1; then
+        echo -e "${YELLOW}未检测到 pip，正在安装 python3-pip...${NC}"
+        apt-get install -y python3-pip
     fi
 
     # 2. 依赖安装
