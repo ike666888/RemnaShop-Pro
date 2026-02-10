@@ -17,6 +17,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
 DB_FILE = os.path.join(BASE_DIR, 'starlight.db')
 
+ANOMALY_IP_THRESHOLD = 50
+
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         print(f"配置文件缺失: {CONFIG_FILE}")
@@ -165,19 +167,26 @@ async def get_panel_user(uuid):
 async def get_nodes_data():
     nodes_resp = await safe_api_request('GET', '/nodes')
     metrics_resp = await safe_api_request('GET', '/system/nodes/metrics')
+    
     nodes = []
     metrics = {}
+    
     if nodes_resp and nodes_resp.status_code == 200:
         data = nodes_resp.json()
         nodes = data.get('response', data.get('data', []))
         if isinstance(nodes, dict): nodes = []
+
     if metrics_resp and metrics_resp.status_code == 200:
         data = metrics_resp.json()
         metric_list = data.get('response', data.get('data', []))
         if isinstance(metric_list, list):
             for m in metric_list:
-                if 'nodeId' in m:
-                    metrics[m['nodeId']] = m
+                # 兼容字符串和数字类型的ID匹配
+                nid = m.get('nodeId')
+                if nid is not None:
+                    metrics[str(nid)] = m
+                    metrics[int(nid)] = m
+    
     return nodes, metrics
 
 async def send_or_edit_menu(update, context, text, reply_markup):
@@ -195,8 +204,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     if update.effective_user.id in temp_orders: del temp_orders[update.effective_user.id]
     user_id = update.effective_user.id
+    
     if user_id == ADMIN_ID:
-        msg_text = (f"👮‍♂️ **管理员控制台**")
+        try:
+            val_notify = db_query("SELECT value FROM settings WHERE key='notify_days'", one=True)
+            notify_days = val_notify['value'] if val_notify else 3
+            val_cleanup = db_query("SELECT value FROM settings WHERE key='cleanup_days'", one=True)
+            cleanup_days = val_cleanup['value'] if val_cleanup else 7
+        except: notify_days = 3; cleanup_days = 7
+        msg_text = (f"👮‍♂️ **管理员控制台**\n🔔 提醒设置：提前 {notify_days} 天\n🗑 清理设置：过期 {cleanup_days} 天")
         keyboard = [
             [InlineKeyboardButton("📦 套餐管理", callback_data="admin_plans_list")],
             [InlineKeyboardButton("👥 用户列表", callback_data="admin_users_list")],
@@ -210,6 +226,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔍 我的订阅 / 续费", callback_data="client_status")],
             [InlineKeyboardButton("🌍 节点状态", callback_data="client_nodes"), InlineKeyboardButton("🆘 联系客服", callback_data="contact_support")]
         ]
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
     await send_or_edit_menu(update, context, msg_text, reply_markup)
 
@@ -229,8 +246,10 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if data == "client_nodes":
         try: await query.edit_message_text("🔄 正在获取节点数据...")
         except: pass
+        
         nodes, metrics = await get_nodes_data()
         msg_list = ["🌍 **节点状态**\n"]
+        
         if not nodes:
             msg_list.append("⚠️ 暂无节点信息")
         else:
@@ -239,18 +258,24 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 node_id = node.get('id')
                 status_raw = str(node.get('status', '')).lower()
                 is_online = status_raw in ['connected', 'healthy', 'online', 'active', 'true'] or node.get('isConnected') is True
+                
                 icon = "🟢" if is_online else "🔴"
                 stat_text = "在线" if is_online else "离线"
+                
                 detail = ""
                 if is_online:
                     m = metrics.get(node_id)
+                    if not m and node_id: m = metrics.get(str(node_id)) # 再次尝试匹配字符串key
+                    
                     if m:
-                        cpu = round(m.get('cpu', 0) * 100, 1) if m.get('cpu') < 1 else round(m.get('cpu', 0), 1)
+                        cpu = round(m.get('cpu', 0) * 100, 1) if m.get('cpu', 0) < 1 else round(m.get('cpu', 0), 1)
                         mem = round(m.get('memory', 0) / (1024**3), 1)
                         up = format_speed(m.get('uplinkSpeed', 0))
                         down = format_speed(m.get('downlinkSpeed', 0))
                         detail = f"\n   ├ 📊 CPU: {cpu}% | RAM: {mem}G\n   └ 🚀 ↑ {up} | ↓ {down}"
+                
                 msg_list.append(f"{icon} **{name}** | {stat_text}{detail}")
+        
         msg_list.append(f"\n_更新时间: {datetime.datetime.now().strftime('%H:%M:%S')}_")
         kb = [[InlineKeyboardButton("🔄 刷新", callback_data="client_nodes")], [InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
         await send_or_edit_menu(update, context, "\n".join(msg_list), InlineKeyboardMarkup(kb))
@@ -280,10 +305,13 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not subs:
             await send_or_edit_menu(update, context, "❌ 您名下没有订阅。\n请点击“购买新订阅”。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
             return
-        try: await query.edit_message_text("🔄 正在加载订阅列表...")
+        
+        try: await query.edit_message_text("🔄 正在加载列表...")
         except: pass
+        
         tasks = [get_panel_user(sub['uuid']) for sub in subs]
         results = await asyncio.gather(*tasks)
+        
         keyboard = []
         valid_count = 0
         for i, info in enumerate(results):
@@ -293,12 +321,15 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             limit = info.get('trafficLimitBytes', 0)
             used = info.get('userTraffic', {}).get('usedTrafficBytes', 0)
             remain_gb = round((limit - used) / (1024**3), 1)
+            
             sid = get_short_id(sub_db['uuid'])
             btn_text = f"📦 订阅 #{valid_count} | 剩余 {remain_gb} GB"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_sub_{sid}")])
+        
         if valid_count == 0:
              await send_or_edit_menu(update, context, "⚠️ 您的所有订阅似乎都已失效。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
              return
+
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
         await send_or_edit_menu(update, context, "👤 **我的订阅列表**\n请点击下方按钮查看详情：", InlineKeyboardMarkup(keyboard))
 
@@ -308,13 +339,16 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not target_uuid:
             await query.answer("❌ 按钮已过期")
             return
+
         await query.answer("🔄 加载详情中...")
         try: await query.delete_message()
         except: pass
+
         info = await get_panel_user(target_uuid)
         if not info:
             await context.bot.send_message(user_id, "⚠️ 此订阅已被删除。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回列表", callback_data="client_status")]]))
             return
+
         expire_show = format_time(info.get('expireAt'))
         limit = info.get('trafficLimitBytes', 0)
         used = info.get('userTraffic', {}).get('usedTrafficBytes', 0)
@@ -322,11 +356,24 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         remain_gb = round((limit - used) / (1024**3), 2)
         sub_url = info.get('subscriptionUrl', '无链接')
         progress = draw_progress_bar(used, limit)
+        
         strategy = info.get('trafficLimitStrategy', 'NO_RESET')
         strategy_label = get_strategy_label(strategy)
-        caption = (f"📃 **订阅详情**\n\n📊 流量：`{progress}`\n🔋 剩余：`{remain_gb} GB` / `{limit_gb} GB ({strategy_label})`\n⏳ 到期：`{expire_show}`\n🔗 订阅链接：\n`{sub_url}`")
+
+        caption = (
+            f"📃 **订阅详情**\n\n"
+            f"📊 流量：`{progress}`\n"
+            f"🔋 剩余：`{remain_gb} GB` / `{limit_gb} GB ({strategy_label})`\n"
+            f"⏳ 到期：`{expire_show}`\n"
+            f"🔗 订阅链接：\n`{sub_url}`"
+        )
+        
         sid = get_short_id(target_uuid)
-        keyboard = [[InlineKeyboardButton(f"💳 续费此订阅", callback_data=f"selrenew_{sid}")], [InlineKeyboardButton("🔙 返回列表", callback_data="client_status")]]
+        keyboard = [
+            [InlineKeyboardButton(f"💳 续费此订阅", callback_data=f"selrenew_{sid}")],
+            [InlineKeyboardButton("🔙 返回列表", callback_data="client_status")]
+        ]
+
         if sub_url and sub_url.startswith('http'):
             qr_bio = generate_qr(sub_url)
             await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -339,6 +386,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not target_uuid:
             await query.answer("❌ 信息过期")
             return
+
         keyboard = []
         plans = db_query("SELECT * FROM plans")
         for p in plans:
@@ -354,18 +402,27 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         parts = data.split("_")
         plan_key = parts[1]
         order_type = parts[2]
+        
         if order_type == 'renew':
             short_id = parts[3]
             target_uuid = get_real_uuid(short_id)
         else:
             target_uuid = "0"
+
         plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
         if not plan: return
-        temp_orders[user_id] = {"plan": plan_key, "type": order_type, "target_uuid": target_uuid, "menu_msg_id": query.message.message_id}
+        
+        temp_orders[user_id] = {
+            "plan": plan_key, "type": order_type, "target_uuid": target_uuid,
+            "menu_msg_id": query.message.message_id
+        }
+        
         type_str = "续费" if order_type == 'renew' else "新购"
         back_data = "client_buy_new" if order_type == 'new' else f"selrenew_{short_id}" if order_type == 'renew' else "back_home"
+        
         strategy = plan.get('reset_strategy', 'NO_RESET')
         strategy_label = get_strategy_label(strategy)
+        
         keyboard = [[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")], [InlineKeyboardButton("🔙 重选套餐", callback_data=back_data)]]
         msg = (f"📝 **订单确认 ({type_str})**\n📦 套餐：{plan['name']}\n💰 金额：**{plan['price']}**\n📡 流量：**{plan['gb']} GB ({strategy_label})**\n\n💳 **下一步：**\n请在此直接发送 **支付宝口令红包** (文字) 给机器人。\n👇 👇 👇")
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
@@ -555,8 +612,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ 已设置：过期后 {text} 天自动删除。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         else: await update.message.reply_text("❌ 请输入数字", reply_markup=cancel_kb)
         return
-    
-    # 异常检测设置逻辑
     if user_id == ADMIN_ID and context.user_data.get('setting_anomaly_interval') and text:
         try:
             val = float(text)
@@ -567,7 +622,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ 周期已更新：每 {val} 小时检测一次。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_anomaly_menu")]]))
         except: await update.message.reply_text("❌ 请输入有效的数字 (例如 0.5 或 1)", reply_markup=cancel_kb)
         return
-
     if user_id == ADMIN_ID and context.user_data.get('setting_anomaly_threshold') and text:
         if text.isdigit():
             db_execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('anomaly_threshold', ?)", (text,))
@@ -575,7 +629,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ 阈值已更新：> {text} IP 封禁。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_anomaly_menu")]]))
         else: await update.message.reply_text("❌ 请输入整数", reply_markup=cancel_kb)
         return
-
     if user_id == ADMIN_ID and 'add_plan_step' in context.user_data and text:
         step = context.user_data['add_plan_step']
         if step == 'name':
@@ -728,7 +781,9 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
         notify_days = int(val['value']) if val else 3
         val_clean = db_query("SELECT value FROM settings WHERE key='cleanup_days'", one=True)
         cleanup_days = int(val_clean['value']) if val_clean else 7
-    except: notify_days = 3; cleanup_days = 7
+    except: 
+        notify_days = 3
+        cleanup_days = 7
     subs = db_query("SELECT * FROM subscriptions")
     if not subs: return
     now = datetime.datetime.utcnow()
@@ -780,7 +835,7 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
         for uid, ips in user_ip_map.items():
             if len(ips) > limit:
                 await safe_api_request('POST', f"/users/{uid}/actions/disable")
-                try: await context.bot.send_message(ADMIN_ID, f"🚨 **异常检测**\n\n用户 `{uid}` 使用了 {len(ips)} 个IP。\n已自动禁用。")
+                try: await context.bot.send_message(ADMIN_ID, f"🚨 **异常检测**\n\n用户 `{uid}` 在短时间内使用了 {len(ips)} 个不同IP请求订阅。\n系统已自动将其禁用。")
                 except: pass
     except: pass
 
@@ -811,11 +866,9 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(process_order, pattern="^(ap|rj)_"))
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    # 默认1小时检查一次异常，启动后会根据数据库配置重置
     app.job_queue.run_daily(check_expiry_job, time=datetime.time(hour=12, minute=0, second=0))
     app.job_queue.run_repeating(check_anomalies_job, interval=3600, first=60, name='check_anomalies_job')
     
-    # 启动时自动读取DB并应用正确的周期
     try:
         val_int = db_query("SELECT value FROM settings WHERE key='anomaly_interval'", one=True)
         if val_int:
