@@ -1,11 +1,13 @@
 import logging
-import requests
+import httpx
 import time
 import datetime
 import json
 import os
 import sqlite3
 import asyncio
+import qrcode
+from io import BytesIO
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
@@ -29,8 +31,20 @@ PANEL_TOKEN = config['panel_token']
 SUB_DOMAIN = config['sub_domain'].rstrip('/')
 TARGET_GROUP_UUID = config['group_uuid']
 
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+user_cooldowns = {}
+COOLDOWN_SECONDS = 2.0
+
+def check_cooldown(user_id):
+    if user_id == ADMIN_ID: return True
+    now = time.time()
+    last_time = user_cooldowns.get(user_id, 0)
+    if now - last_time < COOLDOWN_SECONDS: return False
+    user_cooldowns[user_id] = now
+    return True
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -72,23 +86,51 @@ temp_orders = {}
 def get_headers():
     return {"Authorization": f"Bearer {PANEL_TOKEN}", "Content-Type": "application/json"}
 
-def get_panel_user(uuid):
+async def get_panel_user(uuid):
+    url = f"{PANEL_URL}/users/{uuid}"
     try:
-        r = requests.get(f"{PANEL_URL}/users/{uuid}", headers=get_headers(), verify=False)
-        if r.status_code == 200:
-            return r.json().get('response', r.json())
-    except:
-        pass
+        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+            resp = await client.get(url, headers=get_headers())
+            if resp.status_code == 200:
+                return resp.json().get('response', resp.json())
+    except Exception as e: logger.error(f"API Error: {e}")
     return None
+
+async def get_nodes_status():
+    url = f"{PANEL_URL}/nodes"
+    try:
+        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+            resp = await client.get(url, headers=get_headers())
+            if resp.status_code == 200:
+                return resp.json().get('response', resp.json())
+    except: pass
+    return []
 
 def format_time(iso_str):
     if not iso_str: return "未知"
     try:
         clean_str = iso_str.split('.')[0].replace('Z', '')
         dt = datetime.datetime.strptime(clean_str, "%Y-%m-%dT%H:%M:%S")
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except:
-        return iso_str
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except: return iso_str
+
+def draw_progress_bar(used, total, length=10):
+    if total == 0: return "♾️ 无限制"
+    percent = used / total
+    if percent > 1: percent = 1
+    filled_length = int(length * percent)
+    bar = "█" * filled_length + "░" * (length - filled_length)
+    return f"{bar} {round(percent * 100)}%"
+
+def generate_qr(text):
+    qr = qrcode.QRCode(version=1, box_size=10, border=2)
+    qr.add_data(text)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    bio = BytesIO()
+    img.save(bio)
+    bio.seek(0)
+    return bio
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
@@ -100,9 +142,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             notify_days = val_notify['value'] if val_notify else 3
             val_cleanup = db_query("SELECT value FROM settings WHERE key='cleanup_days'", one=True)
             cleanup_days = val_cleanup['value'] if val_cleanup else 3
-        except:
-            notify_days = 3
-            cleanup_days = 3
+        except: notify_days = 3; cleanup_days = 3
         msg_text = (f"👮‍♂️ **管理员控制台**\n🔔 提醒设置：到期前 {notify_days} 天\n🗑 自动清理：过期后 {cleanup_days} 天")
         keyboard = [
             [InlineKeyboardButton("📦 套餐管理", callback_data="admin_plans_list")],
@@ -114,7 +154,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("🛒 购买新订阅", callback_data="client_buy_new")],
             [InlineKeyboardButton("🔍 我的订阅 / 续费", callback_data="client_status")],
-            [InlineKeyboardButton("🆘 联系客服", callback_data="contact_support")]
+            [InlineKeyboardButton("🌍 节点状态", callback_data="client_nodes"), InlineKeyboardButton("🆘 联系客服", callback_data="contact_support")]
         ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     if update.callback_query:
@@ -125,18 +165,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not check_cooldown(query.from_user.id):
+        await query.answer("⏳ 操作太快了，请稍候...", show_alert=False)
+        return
     await query.answer()
     data = query.data
     user_id = query.from_user.id
+
     if data == "back_home":
         await start(update, context)
         return
+
+    if data == "client_nodes":
+        await query.edit_message_text("🔄 正在获取节点状态，请稍候...")
+        nodes = await get_nodes_status()
+        if not nodes:
+            await query.edit_message_text("⚠️ 暂时无法获取节点信息。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+            return
+        
+        msg_list = ["🌍 **节点状态实时监控**\n"]
+        for node in nodes:
+            name = node.get('name', '未知节点')
+            status = "🟢 在线" if node.get('status') == 'connected' or node.get('connected') else "🔴 离线"
+            msg_list.append(f"• {name} | {status}")
+        
+        msg_list.append(f"\n_最后更新: {datetime.datetime.now().strftime('%H:%M:%S')}_")
+        kb = [[InlineKeyboardButton("🔄 刷新", callback_data="client_nodes")], [InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
+        await query.edit_message_text("\n".join(msg_list), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        return
+
     if data == "contact_support":
         context.user_data['chat_mode'] = 'support'
         msg = "📞 **客服模式已开启**\n请直接发送文字、图片或文件。\n🚪 结束咨询请点击下方按钮。"
         keyboard = [[InlineKeyboardButton("🚪 结束咨询", callback_data="back_home")]]
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         return
+
     if data == "client_buy_new":
         keyboard = []
         plans = db_query("SELECT * FROM plans")
@@ -148,32 +212,47 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
         await query.edit_message_text("🛒 **请选择新购套餐：**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
     elif data == "client_status":
         subs = db_query("SELECT * FROM subscriptions WHERE tg_id = ?", (user_id,))
         if not subs:
             await query.edit_message_text("❌ 您名下没有订阅。\n请点击“购买新订阅”。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
             return
-        msg_list = []
-        keyboard = []
+        
+        try: await query.delete_message()
+        except: pass
+
         for i, sub in enumerate(subs):
             uuid = sub['uuid']
-            info = get_panel_user(uuid)
+            info = await get_panel_user(uuid)
             if not info:
-                msg_list.append(f"⚠️ **订阅 #{i+1}** (已被删除)")
+                await context.bot.send_message(user_id, f"⚠️ **订阅 #{i+1}** (已被删除)", parse_mode='Markdown')
                 continue
+            
             expire_show = format_time(info.get('expireAt'))
-            limit_gb = round(info.get('trafficLimitBytes', 0) / (1024**3), 2)
-            used_gb = round(info.get('userTraffic', {}).get('usedTrafficBytes', 0) / (1024**3), 2)
-            remain_gb = round(limit_gb - used_gb, 2)
+            limit = info.get('trafficLimitBytes', 0)
+            used = info.get('userTraffic', {}).get('usedTrafficBytes', 0)
+            limit_gb = round(limit / (1024**3), 2)
+            remain_gb = round((limit - used) / (1024**3), 2)
             sub_url = info.get('subscriptionUrl', '无链接')
-            strategy = info.get('trafficLimitStrategy', 'NO_RESET')
-            s_map = {'NO_RESET': '永不重置', 'DAY': '每日重置', 'WEEK': '每周重置', 'MONTH': '每月重置'}
-            s_text = s_map.get(strategy, strategy)
-            msg_list.append(f"➖➖ **订阅 #{i+1}** ➖➖\n⏳ 到期：`{expire_show}`\n🔋 剩余：`{remain_gb} GB`\n🔄 策略：{s_text}\n🔗 订阅链接：\n`{sub_url}`")
-            keyboard.append([InlineKeyboardButton(f"💳 续费 订阅 #{i+1}", callback_data=f"selrenew_{uuid}")])
-        keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
-        full_msg = "👤 **我的订阅列表**\n" + "\n".join(msg_list)
-        await query.edit_message_text(full_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown', disable_web_page_preview=True)
+            progress = draw_progress_bar(used, limit)
+            
+            caption = (
+                f"➖➖ **订阅 #{i+1}** ➖➖\n"
+                f"📊 流量：`{progress}`\n"
+                f"🔋 剩余：`{remain_gb} GB` / `{limit_gb} GB`\n"
+                f"⏳ 到期：`{expire_show}`\n"
+                f"🔗 订阅链接：\n`{sub_url}`"
+            )
+            keyboard = [[InlineKeyboardButton(f"💳 续费此订阅", callback_data=f"selrenew_{uuid}")]]
+            if sub_url and sub_url.startswith('http'):
+                qr_bio = generate_qr(sub_url)
+                await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+            else:
+                await context.bot.send_message(chat_id=user_id, text=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+        await context.bot.send_message(user_id, "以上是您的所有订阅。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]))
+
     elif data.startswith("selrenew_"):
         target_uuid = data.split("_")[1]
         keyboard = []
@@ -183,7 +262,9 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             action = f"order_{p['key']}_renew_{target_uuid}"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回列表", callback_data="client_status")])
-        await query.edit_message_text("🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        try: await query.edit_message_text("🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        except: await context.bot.send_message(user_id, "🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
     elif data.startswith("order_"):
         parts = data.split("_")
         plan_key = parts[1]
@@ -195,7 +276,9 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         type_str = "续费" if order_type == 'renew' else "新购"
         keyboard = [[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")], [InlineKeyboardButton("🔙 重选套餐", callback_data="client_buy_new" if order_type == 'new' else f"selrenew_{target_uuid}")]]
         msg = (f"📝 **订单确认 ({type_str})**\n📦 套餐：{plan['name']}\n💰 金额：**{plan['price']}**\n📡 流量：**{plan['gb']} GB**\n\n💳 **下一步：**\n请在此直接发送 **支付宝口令红包** (文字) 给机器人。\n👇 👇 👇")
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        try: await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        except: await context.bot.send_message(user_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
     elif data == "cancel_order":
         if user_id in temp_orders: del temp_orders[user_id]
         await start(update, context)
@@ -251,14 +334,16 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not sub:
             await query.edit_message_text("⚠️ 记录不存在", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_users_list")]]))
             return
-        panel_info = get_panel_user(target_uuid)
+        panel_info = await get_panel_user(target_uuid)
         status = "🟢 面板正常" if panel_info else "🔴 面板已删"
         msg = (f"👤 **用户详情**\nTG ID: `{sub['tg_id']}`\n状态: {status}\nUUID: `{target_uuid}`\n\n⚠️ **删除操作不可恢复！**")
         keyboard = [[InlineKeyboardButton("🗑 确认删除用户", callback_data=f"confirm_del_user_{target_uuid}")], [InlineKeyboardButton("🔙 返回列表", callback_data="admin_users_list")]]
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     elif data.startswith("confirm_del_user_"):
         target_uuid = data.replace("confirm_del_user_", "")
-        try: requests.delete(f"{PANEL_URL}/users/{target_uuid}", headers=get_headers(), verify=False)
+        try:
+            async with httpx.AsyncClient(verify=False) as client:
+                await client.delete(f"{PANEL_URL}/users/{target_uuid}", headers=get_headers())
         except: pass
         db_execute("DELETE FROM subscriptions WHERE uuid = ?", (target_uuid,))
         await query.answer("✅ 用户已删除", show_alert=True)
@@ -377,6 +462,9 @@ async def add_plan_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not check_cooldown(query.from_user.id):
+        await query.answer("⏳ 操作太快了，请休息一下", show_alert=False)
+        return
     await query.answer()
     data = query.data
     client_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
@@ -411,7 +499,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: reset_strategy = 'NO_RESET'
         try:
             if order_type == 'renew':
-                user_info = get_panel_user(target_uuid)
+                user_info = await get_panel_user(target_uuid)
                 if not user_info:
                     await query.edit_message_text("⚠️ 用户不存在", reply_markup=admin_return_btn)
                     return
@@ -428,7 +516,8 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "expireAt": expire_iso, "status": "ACTIVE", "activeInternalSquads": [TARGET_GROUP_UUID],
                     "trafficLimitStrategy": reset_strategy
                 }
-                r = requests.patch(f"{PANEL_URL}/users", json=update_payload, headers=headers, verify=False)
+                async with httpx.AsyncClient(verify=False) as client:
+                    r = await client.patch(f"{PANEL_URL}/users", json=update_payload, headers=headers)
                 if r.status_code in [200, 204]:
                     await query.edit_message_text(f"✅ 续费成功\n用户: {uid}", reply_markup=admin_return_btn)
                     sub_url = user_info.get('subscriptionUrl', '请在"我的订阅"中查看')
@@ -447,7 +536,8 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "status": "ACTIVE", "trafficLimitBytes": add_traffic, "trafficLimitStrategy": reset_strategy,
                     "expireAt": expire_iso, "proxies": {}, "activeInternalSquads": [TARGET_GROUP_UUID]
                 }
-                r = requests.post(f"{PANEL_URL}/users", json=payload, headers=headers, verify=False)
+                async with httpx.AsyncClient(verify=False) as client:
+                    r = await client.post(f"{PANEL_URL}/users", json=payload, headers=headers)
                 if r.status_code in [200, 201]:
                     resp_data = r.json().get('response', r.json())
                     user_uuid = resp_data.get('uuid')
@@ -477,7 +567,7 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
     if not subs: return
     now = datetime.datetime.utcnow()
     for sub in subs:
-        info = get_panel_user(sub['uuid'])
+        info = await get_panel_user(sub['uuid'])
         if not info: continue
         try:
             ex_str = info.get('expireAt', '').split('.')[0].replace('Z','')
@@ -490,7 +580,9 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
                 except: pass
             if days_left < -cleanup_days:
                 logger.info(f"自动清理用户: {sub['uuid']}")
-                try: requests.delete(f"{PANEL_URL}/users/{sub['uuid']}", headers=get_headers(), verify=False)
+                try:
+                    async with httpx.AsyncClient(verify=False) as client:
+                        await client.delete(f"{PANEL_URL}/users/{sub['uuid']}", headers=get_headers())
                 except: pass
                 db_execute("DELETE FROM subscriptions WHERE uuid = ?", (sub['uuid'],))
                 try: await context.bot.send_message(sub['tg_id'], f"🗑 您的订阅因过期超过 {cleanup_days} 天已被自动清理。")
@@ -498,7 +590,8 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e: pass
 
 if __name__ == '__main__':
-    requests.packages.urllib3.disable_warnings()
+    import urllib3
+    urllib3.disable_warnings()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^admin_"))
@@ -516,8 +609,9 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^cancel_order"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^back_home$"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^contact_support$"))
+    app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^client_nodes$"))
     app.add_handler(CallbackQueryHandler(process_order, pattern="^(ap|rj)_"))
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     app.job_queue.run_daily(check_expiry_job, time=datetime.time(hour=12, minute=0, second=0))
-    print(f"🚀 RemnaShop-Pro (星光数据库版) 服务已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V1.2 已启动 | 监听中...")
     app.run_polling()
