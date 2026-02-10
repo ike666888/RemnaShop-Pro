@@ -86,6 +86,10 @@ bash <(curl -sL [https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/
 journalctl -u remnashop -f
 
 # 重启机器人
+systemctl restart remnashop
+
+# 停止机器人
+systemctl stop remnashop
 ## 📞 联系与支持
 ```
 * **作者**：ike
@@ -93,7 +97,3 @@ journalctl -u remnashop -f
 
 ---
 *本项目仅供学习交流使用，请遵守当地法律法规。*
-systemctl restart remnashop
-
-# 停止机器人
-systemctl stop remnashop
