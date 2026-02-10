@@ -102,7 +102,12 @@ async def get_nodes_status():
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
             resp = await client.get(url, headers=get_headers())
             if resp.status_code == 200:
-                return resp.json().get('response', resp.json())
+                # 兼容部分面板返回 {data: [...]} 结构
+                data = resp.json()
+                if 'response' in data: return data['response']
+                if 'data' in data: return data['data']
+                if isinstance(data, list): return data
+                return []
     except: pass
     return []
 
@@ -186,7 +191,12 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         msg_list = ["🌍 **节点状态实时监控**\n"]
         for node in nodes:
             name = node.get('name', '未知节点')
-            status = "🟢 在线" if node.get('status') == 'connected' or node.get('connected') else "🔴 离线"
+            # 兼容多种在线状态字段
+            is_online = False
+            if node.get('status') in ['connected', 'healthy', 'online', 'available']: is_online = True
+            if node.get('connected') is True: is_online = True
+            
+            status = "🟢 在线" if is_online else "🔴 离线"
             msg_list.append(f"• {name} | {status}")
         
         msg_list.append(f"\n_最后更新: {datetime.datetime.now().strftime('%H:%M:%S')}_")
@@ -244,14 +254,17 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"⏳ 到期：`{expire_show}`\n"
                 f"🔗 订阅链接：\n`{sub_url}`"
             )
-            keyboard = [[InlineKeyboardButton(f"💳 续费此订阅", callback_data=f"selrenew_{uuid}")]]
+            # 合并续费和返回按钮到同一个键盘
+            keyboard = [
+                [InlineKeyboardButton(f"💳 续费此订阅", callback_data=f"selrenew_{uuid}")],
+                [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]
+            ]
+            
             if sub_url and sub_url.startswith('http'):
                 qr_bio = generate_qr(sub_url)
                 await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
             else:
                 await context.bot.send_message(chat_id=user_id, text=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-
-        await context.bot.send_message(user_id, "以上是您的所有订阅。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]))
 
     elif data.startswith("selrenew_"):
         target_uuid = data.split("_")[1]
@@ -447,7 +460,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = temp_orders[user_id]
         plan = db_query("SELECT * FROM plans WHERE key = ?", (order['plan'],), one=True)
         t_str = "续费" if order['type'] == 'renew' else "新购"
-        admin_msg = f"💰 **审核 {t_str}**\n👤 {update.effective_user.mention_html()} (`{user_id}`)\n📦 {plan['name']}\n📝 口令：`{text}`"
+        # 修复口令复制：使用 <code> 标签
+        admin_msg = f"💰 **审核 {t_str}**\n👤 {update.effective_user.mention_html()} (`{user_id}`)\n📦 {plan['name']}\n📝 口令：<code>{text}</code>"
         safe_uuid = order['target_uuid'] if order['target_uuid'] else "0"
         kb = [[InlineKeyboardButton("✅ 通过", callback_data=f"ap_{user_id}_{order['plan']}_{order['type']}_{safe_uuid}")], [InlineKeyboardButton("❌ 拒绝", callback_data=f"rj_{user_id}")]]
         await context.bot.send_message(ADMIN_ID, admin_msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
@@ -613,5 +627,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(process_order, pattern="^(ap|rj)_"))
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     app.job_queue.run_daily(check_expiry_job, time=datetime.time(hour=12, minute=0, second=0))
-    print(f"🚀 RemnaShop-Pro V1.2 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V1.3 已启动 | 监听中...")
     app.run_polling()
