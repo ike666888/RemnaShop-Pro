@@ -36,7 +36,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 user_cooldowns = {}
-COOLDOWN_SECONDS = 1.5
+COOLDOWN_SECONDS = 1.0
 
 def check_cooldown(user_id):
     if user_id == ADMIN_ID: return True
@@ -89,11 +89,11 @@ def get_headers():
 async def get_panel_user(uuid):
     url = f"{PANEL_URL}/users/{uuid}"
     try:
-        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
             resp = await client.get(url, headers=get_headers())
             if resp.status_code == 200:
                 return resp.json().get('response', resp.json())
-    except Exception as e: logger.error(f"API Error: {e}")
+    except Exception as e: logger.error(f"API Error (User): {e}")
     return None
 
 async def get_nodes_status():
@@ -106,11 +106,8 @@ async def get_nodes_status():
                 if 'response' in data: return data['response']
                 if 'data' in data: return data['data']
                 if isinstance(data, list): return data
-                return []
-            else:
-                logger.error(f"Get Nodes Failed: {resp.status_code} - {resp.text}")
     except Exception as e:
-        logger.error(f"Get Nodes Exception: {e}")
+        logger.error(f"API Error (Nodes): {e}")
     return []
 
 def format_time(iso_str):
@@ -184,24 +181,27 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "client_nodes":
-        await query.edit_message_text("🔄 正在获取节点状态，请稍候...")
+        await query.edit_message_text("🔄 正在检测节点状态...")
         nodes = await get_nodes_status()
-        if not nodes:
-            await query.edit_message_text("⚠️ 暂时无法获取节点信息或API响应为空。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
-            return
         
         msg_list = ["🌍 **节点状态实时监控**\n"]
-        for node in nodes:
-            name = node.get('name', '未知节点')
-            status_raw = str(node.get('status', '')).lower()
-            is_connected = node.get('connected', False)
-            
-            is_online = False
-            if status_raw in ['connected', 'healthy', 'online', 'active', 'true', '1']: is_online = True
-            if is_connected: is_online = True
-            
-            status = "🟢 在线" if is_online else "🔴 离线"
-            msg_list.append(f"• {name} | {status}")
+        if not nodes:
+            msg_list.append("⚠️ 暂无节点信息或API连接失败")
+        else:
+            for node in nodes:
+                # 打印日志以便调试
+                logger.info(f"Node Info: {node}")
+                name = node.get('name', '未知节点')
+                status_val = node.get('status')
+                
+                is_online = False
+                if str(status_val).lower() in ['connected', 'healthy', 'online', 'active', 'true']: is_online = True
+                # 兼容部分面板使用 isConnected 布尔值
+                if node.get('isConnected') is True: is_online = True
+                
+                icon = "🟢" if is_online else "🔴"
+                stat_text = "在线" if is_online else "离线"
+                msg_list.append(f"{icon} {name} | {stat_text}")
         
         msg_list.append(f"\n_最后更新: {datetime.datetime.now().strftime('%H:%M:%S')}_")
         kb = [[InlineKeyboardButton("🔄 刷新", callback_data="client_nodes")], [InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
@@ -233,19 +233,39 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.edit_message_text("❌ 您名下没有订阅。\n请点击“购买新订阅”。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
             return
         
-        keyboard = []
-        for i, sub in enumerate(subs):
-            uuid_short = sub['uuid'][:8]
-            keyboard.append([InlineKeyboardButton(f"📦 订阅 #{i+1} (UUID: {uuid_short}..)", callback_data=f"view_sub_{sub['uuid']}")])
+        await query.edit_message_text("🔄 正在加载订阅列表，请稍候...")
         
+        # 🟢 修复核心：使用 asyncio.gather 并发请求，解决 Timeout 问题
+        tasks = [get_panel_user(sub['uuid']) for sub in subs]
+        results = await asyncio.gather(*tasks)
+        
+        keyboard = []
+        valid_count = 0
+        for i, info in enumerate(results):
+            sub_db = subs[i]
+            if not info:
+                # 标记已失效的订阅（可选：是否显示）
+                continue
+            
+            valid_count += 1
+            limit = info.get('trafficLimitBytes', 0)
+            used = info.get('userTraffic', {}).get('usedTrafficBytes', 0)
+            remain_gb = round((limit - used) / (1024**3), 1)
+            
+            # 按钮显示：订阅 #1 | 剩余 10.5G
+            btn_text = f"📦 订阅 #{valid_count} | 剩余 {remain_gb} GB"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_sub_{sub_db['uuid']}")])
+        
+        if valid_count == 0:
+             await query.edit_message_text("⚠️ 您的所有订阅似乎都已失效。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+             return
+
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
-        await query.edit_message_text("👤 **我的订阅列表**\n请点击下方按钮查看详情：", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await query.edit_message_text("👤 **我的订阅列表**\n请点击下方按钮查看详情、二维码及续费：", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     elif data.startswith("view_sub_"):
         target_uuid = data.split("_")[2]
         await query.answer("🔄 加载详情中...")
-        
-        # 删除列表消息，准备发图
         try: await query.delete_message()
         except: pass
 
@@ -291,14 +311,10 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回列表", callback_data="client_status")])
         
-        # 尝试编辑消息，如果因为是图片无法编辑则发送新消息
-        try:
-            await query.edit_message_text("🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-        except:
-            # 删掉旧的图文消息，保持界面清爽
-            try: await query.delete_message()
-            except: pass
-            await context.bot.send_message(user_id, "🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        try: await query.delete_message()
+        except: pass
+        
+        await context.bot.send_message(user_id, "🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     elif data.startswith("order_"):
         parts = data.split("_")
@@ -308,7 +324,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
         if not plan: return
         
-        # 记录订单时保存上一个菜单的消息ID
+        # 记录用户的消息ID，方便后续删除
         temp_orders[user_id] = {
             "plan": plan_key, 
             "type": order_type, 
@@ -512,14 +528,14 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
     admin_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
     
-    # 清理函数：删除用户的“等待审核”和“订单确认”消息
+    # 🟢 修复：强制清理用户端界面的函数
     async def clean_user_waiting_msg(uid):
         if uid in temp_orders:
             # 1. 删除 '等待管理员确认' 消息
             if 'waiting_msg_id' in temp_orders[uid]:
                 try: await context.bot.delete_message(chat_id=uid, message_id=temp_orders[uid]['waiting_msg_id'])
                 except: pass
-            # 2. 删除 '订单确认(带取消按钮)' 的菜单消息
+            # 2. 🟢 修复图2：删除 '订单确认(带取消按钮)' 的菜单消息
             if 'menu_msg_id' in temp_orders[uid]:
                 try: await context.bot.delete_message(chat_id=uid, message_id=temp_orders[uid]['menu_msg_id'])
                 except: pass
@@ -572,7 +588,6 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if r.status_code in [200, 204]:
                     await query.edit_message_text(f"✅ 续费成功\n用户: {uid}", reply_markup=admin_return_btn)
                     
-                    # 重新获取最新信息以展示
                     sub_url = user_info.get('subscriptionUrl', '')
                     display_expire = format_time(expire_iso)
                     display_traffic = round(new_limit/1024**3, 2)
@@ -580,7 +595,6 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     await clean_user_waiting_msg(uid)
                     
-                    # 发送带二维码的成功消息
                     if sub_url and sub_url.startswith('http'):
                         qr = generate_qr(sub_url)
                         await context.bot.send_photo(uid, photo=qr, caption=msg, parse_mode='Markdown', reply_markup=client_return_btn)
@@ -611,7 +625,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     await clean_user_waiting_msg(uid)
                     
-                    # 发送带二维码的成功消息
+                    # 🟢 修复图3：发货成功直接发二维码
                     if sub_url and sub_url.startswith('http'):
                         qr = generate_qr(sub_url)
                         await context.bot.send_photo(uid, photo=qr, caption=msg, parse_mode='Markdown', reply_markup=client_return_btn)
@@ -678,8 +692,9 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^back_home$"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^contact_support$"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^client_nodes$"))
+    app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^view_sub_")) # 🟢 新增：处理单个订阅查看
     app.add_handler(CallbackQueryHandler(process_order, pattern="^(ap|rj)_"))
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     app.job_queue.run_daily(check_expiry_job, time=datetime.time(hour=12, minute=0, second=0))
-    print(f"🚀 RemnaShop-Pro V1.4 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V1.5 已启动 | 监听中...")
     app.run_polling()
