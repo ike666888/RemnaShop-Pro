@@ -136,10 +136,26 @@ def generate_qr(text):
     bio.seek(0)
     return bio
 
+# 🟢 核心修复：安全的菜单发送函数
+# 自动判断是编辑还是发送新消息，防止 BadRequest
+async def send_or_edit_menu(update, context, text, reply_markup):
+    if update.callback_query:
+        try:
+            # 尝试编辑消息（仅当原消息是纯文本时有效）
+            await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode='Markdown')
+        except Exception:
+            # 如果编辑失败（例如原消息是图片），则删除原消息并发送新消息
+            try: await update.callback_query.delete_message()
+            except: pass
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='Markdown')
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='Markdown')
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     if update.effective_user.id in temp_orders: del temp_orders[update.effective_user.id]
     user_id = update.effective_user.id
+    
     if user_id == ADMIN_ID:
         try:
             val_notify = db_query("SELECT value FROM settings WHERE key='notify_days'", one=True)
@@ -160,12 +176,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔍 我的订阅 / 续费", callback_data="client_status")],
             [InlineKeyboardButton("🌍 节点状态", callback_data="client_nodes"), InlineKeyboardButton("🆘 联系客服", callback_data="contact_support")]
         ]
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
-    if update.callback_query:
-        try: await update.callback_query.edit_message_text(text=msg_text, reply_markup=reply_markup, parse_mode='Markdown')
-        except: await update.callback_query.message.reply_text(text=msg_text, reply_markup=reply_markup, parse_mode='Markdown')
-    else:
-        await update.message.reply_text(text=msg_text, reply_markup=reply_markup, parse_mode='Markdown')
+    await send_or_edit_menu(update, context, msg_text, reply_markup)
 
 async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -181,38 +194,34 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "client_nodes":
-        await query.edit_message_text("🔄 正在检测节点状态...")
-        nodes = await get_nodes_status()
+        try: await query.edit_message_text("🔄 正在检测节点状态...")
+        except: pass # 忽略无法编辑的情况
         
+        nodes = await get_nodes_status()
         msg_list = ["🌍 **节点状态实时监控**\n"]
         if not nodes:
             msg_list.append("⚠️ 暂无节点信息或API连接失败")
         else:
             for node in nodes:
-                # 打印日志以便调试
-                logger.info(f"Node Info: {node}")
                 name = node.get('name', '未知节点')
                 status_val = node.get('status')
-                
                 is_online = False
                 if str(status_val).lower() in ['connected', 'healthy', 'online', 'active', 'true']: is_online = True
-                # 兼容部分面板使用 isConnected 布尔值
                 if node.get('isConnected') is True: is_online = True
-                
                 icon = "🟢" if is_online else "🔴"
                 stat_text = "在线" if is_online else "离线"
                 msg_list.append(f"{icon} {name} | {stat_text}")
         
         msg_list.append(f"\n_最后更新: {datetime.datetime.now().strftime('%H:%M:%S')}_")
         kb = [[InlineKeyboardButton("🔄 刷新", callback_data="client_nodes")], [InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
-        await query.edit_message_text("\n".join(msg_list), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        await send_or_edit_menu(update, context, "\n".join(msg_list), InlineKeyboardMarkup(kb))
         return
 
     if data == "contact_support":
         context.user_data['chat_mode'] = 'support'
         msg = "📞 **客服模式已开启**\n请直接发送文字、图片或文件。\n🚪 结束咨询请点击下方按钮。"
         keyboard = [[InlineKeyboardButton("🚪 结束咨询", callback_data="back_home")]]
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
         return
 
     if data == "client_buy_new":
@@ -225,17 +234,17 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             action = f"order_{p['key']}_new_0"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
-        await query.edit_message_text("🛒 **请选择新购套餐：**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await send_or_edit_menu(update, context, "🛒 **请选择新购套餐：**", InlineKeyboardMarkup(keyboard))
 
     elif data == "client_status":
         subs = db_query("SELECT * FROM subscriptions WHERE tg_id = ?", (user_id,))
         if not subs:
-            await query.edit_message_text("❌ 您名下没有订阅。\n请点击“购买新订阅”。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+            await send_or_edit_menu(update, context, "❌ 您名下没有订阅。\n请点击“购买新订阅”。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
             return
         
-        await query.edit_message_text("🔄 正在加载订阅列表，请稍候...")
+        try: await query.edit_message_text("🔄 正在加载订阅列表，请稍候...")
+        except: pass
         
-        # 🟢 修复核心：使用 asyncio.gather 并发请求，解决 Timeout 问题
         tasks = [get_panel_user(sub['uuid']) for sub in subs]
         results = await asyncio.gather(*tasks)
         
@@ -243,29 +252,26 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         valid_count = 0
         for i, info in enumerate(results):
             sub_db = subs[i]
-            if not info:
-                # 标记已失效的订阅（可选：是否显示）
-                continue
-            
+            if not info: continue
             valid_count += 1
             limit = info.get('trafficLimitBytes', 0)
             used = info.get('userTraffic', {}).get('usedTrafficBytes', 0)
             remain_gb = round((limit - used) / (1024**3), 1)
-            
-            # 按钮显示：订阅 #1 | 剩余 10.5G
             btn_text = f"📦 订阅 #{valid_count} | 剩余 {remain_gb} GB"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_sub_{sub_db['uuid']}")])
         
         if valid_count == 0:
-             await query.edit_message_text("⚠️ 您的所有订阅似乎都已失效。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+             await send_or_edit_menu(update, context, "⚠️ 您的所有订阅似乎都已失效。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
              return
 
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
-        await query.edit_message_text("👤 **我的订阅列表**\n请点击下方按钮查看详情、二维码及续费：", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await send_or_edit_menu(update, context, "👤 **我的订阅列表**\n请点击下方按钮查看详情、二维码及续费：", InlineKeyboardMarkup(keyboard))
 
     elif data.startswith("view_sub_"):
         target_uuid = data.split("_")[2]
         await query.answer("🔄 加载详情中...")
+        
+        # 删除上一级菜单（无论它是文本还是正在加载的消息）
         try: await query.delete_message()
         except: pass
 
@@ -311,10 +317,8 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回列表", callback_data="client_status")])
         
-        try: await query.delete_message()
-        except: pass
-        
-        await context.bot.send_message(user_id, "🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        # 🟢 修复图2：安全地从图片/文本消息切换到纯文本
+        await send_or_edit_menu(update, context, "🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", InlineKeyboardMarkup(keyboard))
 
     elif data.startswith("order_"):
         parts = data.split("_")
@@ -324,7 +328,6 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
         if not plan: return
         
-        # 记录用户的消息ID，方便后续删除
         temp_orders[user_id] = {
             "plan": plan_key, 
             "type": order_type, 
@@ -336,8 +339,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         keyboard = [[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")], [InlineKeyboardButton("🔙 重选套餐", callback_data="client_buy_new" if order_type == 'new' else f"selrenew_{target_uuid}")]]
         msg = (f"📝 **订单确认 ({type_str})**\n📦 套餐：{plan['name']}\n💰 金额：**{plan['price']}**\n📡 流量：**{plan['gb']} GB**\n\n💳 **下一步：**\n请在此直接发送 **支付宝口令红包** (文字) 给机器人。\n👇 👇 👇")
         
-        try: await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-        except: await context.bot.send_message(user_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
 
     elif data == "cancel_order":
         if user_id in temp_orders: del temp_orders[user_id]
@@ -351,7 +353,7 @@ async def show_plans_menu(update, context):
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"plan_detail_{p['key']}")])
     keyboard.append([InlineKeyboardButton("➕ 添加新套餐", callback_data="add_plan_start")])
     keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
-    if update.callback_query: await update.callback_query.edit_message_text("📦 **套餐管理**\n点击套餐查看详情或删除。", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await send_or_edit_menu(update, context, "📦 **套餐管理**\n点击套餐查看详情或删除。", InlineKeyboardMarkup(keyboard))
 
 async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -380,7 +382,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except: s_text = 'NO_RESET'
         msg = f"📦 **套餐详情**\n\n🏷 名称：`{p['name']}`\n💰 价格：`{p['price']}`\n⏳ 时长：`{p['days']} 天`\n📡 流量：`{p['gb']} GB`\n🔄 策略：`{s_text}`"
         keyboard = [[InlineKeyboardButton("🗑 删除此套餐", callback_data=f"del_plan_{key}")], [InlineKeyboardButton("🔙 返回列表", callback_data="admin_plans_list")]]
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
     elif data.startswith("del_plan_"):
         key = data.split("_")[2]
         db_execute("DELETE FROM plans WHERE key = ?", (key,))
@@ -392,13 +394,13 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         target_uuid = data.replace("manage_user_", "")
         sub = db_query("SELECT * FROM subscriptions WHERE uuid = ?", (target_uuid,), one=True)
         if not sub:
-            await query.edit_message_text("⚠️ 记录不存在", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_users_list")]]))
+            await send_or_edit_menu(update, context, "⚠️ 记录不存在", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_users_list")]]))
             return
         panel_info = await get_panel_user(target_uuid)
         status = "🟢 面板正常" if panel_info else "🔴 面板已删"
         msg = (f"👤 **用户详情**\nTG ID: `{sub['tg_id']}`\n状态: {status}\nUUID: `{target_uuid}`\n\n⚠️ **删除操作不可恢复！**")
         keyboard = [[InlineKeyboardButton("🗑 确认删除用户", callback_data=f"confirm_del_user_{target_uuid}")], [InlineKeyboardButton("🔙 返回列表", callback_data="admin_users_list")]]
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
     elif data.startswith("confirm_del_user_"):
         target_uuid = data.replace("confirm_del_user_", "")
         try:
@@ -414,7 +416,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             day = val['value'] if val else 3
         except: day = 3
         kb = [[InlineKeyboardButton("🔙 取消", callback_data="cancel_op")]]
-        await query.edit_message_text(f"🔔 **提醒设置**\n当前：到期前 {day} 天发送提醒\n\n**⬇️ 请回复新的天数（纯数字）：**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        await send_or_edit_menu(update, context, f"🔔 **提醒设置**\n当前：到期前 {day} 天发送提醒\n\n**⬇️ 请回复新的天数（纯数字）：**", InlineKeyboardMarkup(kb))
         context.user_data['setting_notify'] = True
     elif data == "admin_cleanup":
         try:
@@ -422,7 +424,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             day = val['value'] if val else 3
         except: day = 3
         kb = [[InlineKeyboardButton("🔙 取消", callback_data="cancel_op")]]
-        await query.edit_message_text(f"🗑 **清理设置**\n当前：过期后 {day} 天自动删除用户\n\n**⬇️ 请回复新的天数（纯数字）：**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        await send_or_edit_menu(update, context, f"🗑 **清理设置**\n当前：过期后 {day} 天自动删除用户\n\n**⬇️ 请回复新的天数（纯数字）：**", InlineKeyboardMarkup(kb))
         context.user_data['setting_cleanup'] = True
     elif data.startswith("set_strategy_"):
         strategy = data.replace("set_strategy_", "")
@@ -430,7 +432,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         key = f"p{int(time.time())}"
         db_execute("INSERT INTO plans VALUES (?, ?, ?, ?, ?, ?)", (key, new_plan['name'], new_plan['price'], new_plan['days'], new_plan['gb'], strategy))
         del context.user_data['add_plan_step']
-        await query.edit_message_text(f"✅ **套餐添加成功！**\n{new_plan['name']} - {strategy}", parse_mode='Markdown')
+        await send_or_edit_menu(update, context, f"✅ **套餐添加成功！**\n{new_plan['name']} - {strategy}", None)
         await asyncio.sleep(1)
         await show_plans_menu(update, context)
 
@@ -443,9 +445,7 @@ async def show_users_list(update, context):
         btn_text = f"🆔 {u['tg_id']} | {date_str}"
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"manage_user_{u['uuid']}")])
     keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
-    text = "👥 **用户管理 (最近20条)**\n点击用户进行删除操作："
-    if update.callback_query: await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-    else: await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await send_or_edit_menu(update, context, "👥 **用户管理 (最近20条)**\n点击用户进行删除操作：", InlineKeyboardMarkup(keyboard))
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -512,7 +512,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton("✅ 通过", callback_data=f"ap_{user_id}_{order['plan']}_{order['type']}_{safe_uuid}")], [InlineKeyboardButton("❌ 拒绝", callback_data=f"rj_{user_id}")]]
         await context.bot.send_message(ADMIN_ID, admin_msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         msg_obj = await update.message.reply_text("✅ 已提交，等待管理员确认。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]))
-        # 记录用户的等待消息ID，用于审核后删除
         temp_orders[user_id]['waiting_msg_id'] = msg_obj.message_id
 
 async def add_plan_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -527,20 +526,15 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     client_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
     admin_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
-    
-    # 🟢 修复：强制清理用户端界面的函数
     async def clean_user_waiting_msg(uid):
         if uid in temp_orders:
-            # 1. 删除 '等待管理员确认' 消息
             if 'waiting_msg_id' in temp_orders[uid]:
                 try: await context.bot.delete_message(chat_id=uid, message_id=temp_orders[uid]['waiting_msg_id'])
                 except: pass
-            # 2. 🟢 修复图2：删除 '订单确认(带取消按钮)' 的菜单消息
             if 'menu_msg_id' in temp_orders[uid]:
                 try: await context.bot.delete_message(chat_id=uid, message_id=temp_orders[uid]['menu_msg_id'])
                 except: pass
             del temp_orders[uid]
-
     if data.startswith("rj_"):
         uid = int(data.split("_")[1])
         await query.edit_message_text("❌ 已拒绝", reply_markup=admin_return_btn)
@@ -587,14 +581,11 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     r = await client.patch(f"{PANEL_URL}/users", json=update_payload, headers=headers)
                 if r.status_code in [200, 204]:
                     await query.edit_message_text(f"✅ 续费成功\n用户: {uid}", reply_markup=admin_return_btn)
-                    
                     sub_url = user_info.get('subscriptionUrl', '')
                     display_expire = format_time(expire_iso)
                     display_traffic = round(new_limit/1024**3, 2)
                     msg = (f"🎉 **续费成功！**\n\n⏳ 新到期时间：`{display_expire}`\n📡 当前总流量：`{display_traffic} GB`\n\n🔗 订阅链接：\n`{sub_url}`")
-                    
                     await clean_user_waiting_msg(uid)
-                    
                     if sub_url and sub_url.startswith('http'):
                         qr = generate_qr(sub_url)
                         await context.bot.send_photo(uid, photo=qr, caption=msg, parse_mode='Markdown', reply_markup=client_return_btn)
@@ -618,14 +609,10 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     db_execute("INSERT INTO subscriptions (tg_id, uuid, created_at) VALUES (?, ?, ?)", 
                                (uid, user_uuid, int(time.time())))
                     await query.edit_message_text(f"✅ 开通成功\n用户: {uid}", reply_markup=admin_return_btn)
-                    
                     sub_url = resp_data.get('subscriptionUrl', '')
                     display_expire = format_time(expire_iso)
                     msg = (f"🎉 **订阅开通成功！**\n\n📦 套餐：{plan['name']}\n⏳ 到期时间：`{display_expire}`\n📡 包含流量：`{plan['gb']} GB`\n\n🔗 订阅链接：\n`{sub_url}`")
-                    
                     await clean_user_waiting_msg(uid)
-                    
-                    # 🟢 修复图3：发货成功直接发二维码
                     if sub_url and sub_url.startswith('http'):
                         qr = generate_qr(sub_url)
                         await context.bot.send_photo(uid, photo=qr, caption=msg, parse_mode='Markdown', reply_markup=client_return_btn)
@@ -692,9 +679,9 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^back_home$"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^contact_support$"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^client_nodes$"))
-    app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^view_sub_")) # 🟢 新增：处理单个订阅查看
+    app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^view_sub_"))
     app.add_handler(CallbackQueryHandler(process_order, pattern="^(ap|rj)_"))
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     app.job_queue.run_daily(check_expiry_job, time=datetime.time(hour=12, minute=0, second=0))
-    print(f"🚀 RemnaShop-Pro V1.5 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V1.6 已启动 | 监听中...")
     app.run_polling()
