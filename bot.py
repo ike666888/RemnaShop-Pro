@@ -7,6 +7,7 @@ import os
 import sqlite3
 import asyncio
 import qrcode
+import uuid # 用于生成短ID映射
 from io import BytesIO
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
@@ -37,6 +38,21 @@ logger = logging.getLogger(__name__)
 
 user_cooldowns = {}
 COOLDOWN_SECONDS = 1.0
+
+# 🟢 内存映射：用于解决 callback_data 64字节限制
+# 结构: { "short_id": "real_long_uuid" }
+uuid_map = {}
+
+def get_short_id(real_uuid):
+    """生成或获取 UUID 的短 ID"""
+    for sid, uid in uuid_map.items():
+        if uid == real_uuid: return sid
+    short_id = str(len(uuid_map) + 1)
+    uuid_map[short_id] = real_uuid
+    return short_id
+
+def get_real_uuid(short_id):
+    return uuid_map.get(short_id)
 
 def check_cooldown(user_id):
     if user_id == ADMIN_ID: return True
@@ -136,15 +152,11 @@ def generate_qr(text):
     bio.seek(0)
     return bio
 
-# 🟢 核心修复：安全的菜单发送函数
-# 自动判断是编辑还是发送新消息，防止 BadRequest
 async def send_or_edit_menu(update, context, text, reply_markup):
     if update.callback_query:
         try:
-            # 尝试编辑消息（仅当原消息是纯文本时有效）
             await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode='Markdown')
         except Exception:
-            # 如果编辑失败（例如原消息是图片），则删除原消息并发送新消息
             try: await update.callback_query.delete_message()
             except: pass
             await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -195,7 +207,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data == "client_nodes":
         try: await query.edit_message_text("🔄 正在检测节点状态...")
-        except: pass # 忽略无法编辑的情况
+        except: pass
         
         nodes = await get_nodes_status()
         msg_list = ["🌍 **节点状态实时监控**\n"]
@@ -257,8 +269,11 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             limit = info.get('trafficLimitBytes', 0)
             used = info.get('userTraffic', {}).get('usedTrafficBytes', 0)
             remain_gb = round((limit - used) / (1024**3), 1)
+            
+            # 🟢 关键修复：使用短ID避免 Button_data_invalid
+            sid = get_short_id(sub_db['uuid'])
             btn_text = f"📦 订阅 #{valid_count} | 剩余 {remain_gb} GB"
-            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_sub_{sub_db['uuid']}")])
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_sub_{sid}")])
         
         if valid_count == 0:
              await send_or_edit_menu(update, context, "⚠️ 您的所有订阅似乎都已失效。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
@@ -268,10 +283,14 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await send_or_edit_menu(update, context, "👤 **我的订阅列表**\n请点击下方按钮查看详情、二维码及续费：", InlineKeyboardMarkup(keyboard))
 
     elif data.startswith("view_sub_"):
-        target_uuid = data.split("_")[2]
-        await query.answer("🔄 加载详情中...")
+        short_id = data.split("_")[2]
+        target_uuid = get_real_uuid(short_id) # 还原真实UUID
         
-        # 删除上一级菜单（无论它是文本还是正在加载的消息）
+        if not target_uuid:
+            await query.answer("❌ 按钮已过期，请重新打开菜单")
+            return
+
+        await query.answer("🔄 加载详情中...")
         try: await query.delete_message()
         except: pass
 
@@ -296,8 +315,10 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"🔗 订阅链接：\n`{sub_url}`"
         )
         
+        # 使用短ID
+        sid = get_short_id(target_uuid)
         keyboard = [
-            [InlineKeyboardButton(f"💳 续费此订阅", callback_data=f"selrenew_{target_uuid}")],
+            [InlineKeyboardButton(f"💳 续费此订阅", callback_data=f"selrenew_{sid}")],
             [InlineKeyboardButton("🔙 返回列表", callback_data="client_status")]
         ]
 
@@ -308,23 +329,35 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(chat_id=user_id, text=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data.startswith("selrenew_"):
-        target_uuid = data.split("_")[1]
+        short_id = data.split("_")[1]
+        target_uuid = get_real_uuid(short_id)
+        
+        if not target_uuid:
+            await query.answer("❌ 信息过期")
+            return
+
         keyboard = []
         plans = db_query("SELECT * FROM plans")
         for p in plans:
             btn_text = f"{p['name']} | {p['price']} | {p['gb']}G"
-            action = f"order_{p['key']}_renew_{target_uuid}"
+            # 传递短ID给下一步
+            action = f"order_{p['key']}_renew_{short_id}"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回列表", callback_data="client_status")])
         
-        # 🟢 修复图2：安全地从图片/文本消息切换到纯文本
         await send_or_edit_menu(update, context, "🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", InlineKeyboardMarkup(keyboard))
 
     elif data.startswith("order_"):
         parts = data.split("_")
         plan_key = parts[1]
         order_type = parts[2]
-        target_uuid = parts[3]
+        
+        if order_type == 'renew':
+            short_id = parts[3]
+            target_uuid = get_real_uuid(short_id)
+        else:
+            target_uuid = "0" # 新购不需要UUID
+
         plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
         if not plan: return
         
@@ -336,9 +369,16 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         }
         
         type_str = "续费" if order_type == 'renew' else "新购"
-        keyboard = [[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")], [InlineKeyboardButton("🔙 重选套餐", callback_data="client_buy_new" if order_type == 'new' else f"selrenew_{target_uuid}")]]
-        msg = (f"📝 **订单确认 ({type_str})**\n📦 套餐：{plan['name']}\n💰 金额：**{plan['price']}**\n📡 流量：**{plan['gb']} GB**\n\n💳 **下一步：**\n请在此直接发送 **支付宝口令红包** (文字) 给机器人。\n👇 👇 👇")
         
+        # 返回键逻辑
+        back_data = "client_buy_new" if order_type == 'new' else f"selrenew_{short_id}" if order_type == 'renew' else "back_home"
+        
+        keyboard = [
+            [InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")],
+            [InlineKeyboardButton("🔙 重选套餐", callback_data=back_data)]
+        ]
+        
+        msg = (f"📝 **订单确认 ({type_str})**\n📦 套餐：{plan['name']}\n💰 金额：**{plan['price']}**\n📡 流量：**{plan['gb']} GB**\n\n💳 **下一步：**\n请在此直接发送 **支付宝口令红包** (文字) 给机器人。\n👇 👇 👇")
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
 
     elif data == "cancel_order":
@@ -391,6 +431,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif data == "admin_users_list":
         await show_users_list(update, context)
     elif data.startswith("manage_user_"):
+        # 这里也改用短ID逻辑会更稳，但用户管理交互较浅，暂维持原样，如果报错再改
         target_uuid = data.replace("manage_user_", "")
         sub = db_query("SELECT * FROM subscriptions WHERE uuid = ?", (target_uuid,), one=True)
         if not sub:
@@ -508,8 +549,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         plan = db_query("SELECT * FROM plans WHERE key = ?", (order['plan'],), one=True)
         t_str = "续费" if order['type'] == 'renew' else "新购"
         admin_msg = f"💰 **审核 {t_str}**\n👤 {update.effective_user.mention_html()} (`{user_id}`)\n📦 {plan['name']}\n📝 口令：<code>{text}</code>"
+        
+        # 使用短ID传递 target_uuid
         safe_uuid = order['target_uuid'] if order['target_uuid'] else "0"
-        kb = [[InlineKeyboardButton("✅ 通过", callback_data=f"ap_{user_id}_{order['plan']}_{order['type']}_{safe_uuid}")], [InlineKeyboardButton("❌ 拒绝", callback_data=f"rj_{user_id}")]]
+        sid = get_short_id(safe_uuid) if safe_uuid != "0" else "0"
+        
+        kb = [[InlineKeyboardButton("✅ 通过", callback_data=f"ap_{user_id}_{order['plan']}_{order['type']}_{sid}")], [InlineKeyboardButton("❌ 拒绝", callback_data=f"rj_{user_id}")]]
         await context.bot.send_message(ADMIN_ID, admin_msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         msg_obj = await update.message.reply_text("✅ 已提交，等待管理员确认。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]))
         temp_orders[user_id]['waiting_msg_id'] = msg_obj.message_id
@@ -526,6 +571,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     client_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
     admin_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
+    
     async def clean_user_waiting_msg(uid):
         if uid in temp_orders:
             if 'waiting_msg_id' in temp_orders[uid]:
@@ -535,6 +581,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try: await context.bot.delete_message(chat_id=uid, message_id=temp_orders[uid]['menu_msg_id'])
                 except: pass
             del temp_orders[uid]
+
     if data.startswith("rj_"):
         uid = int(data.split("_")[1])
         await query.edit_message_text("❌ 已拒绝", reply_markup=admin_return_btn)
@@ -547,7 +594,11 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = int(parts[1])
         plan_key = parts[2]
         order_type = parts[3]
-        target_uuid = parts[4]
+        
+        # 还原 UUID
+        short_id = parts[4]
+        target_uuid = get_real_uuid(short_id) if short_id != "0" else "0"
+        
         plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
         if not plan:
             await query.edit_message_text("❌ 套餐已删除", reply_markup=admin_return_btn)
@@ -556,10 +607,19 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         headers = get_headers()
         add_traffic = plan['gb'] * 1024 * 1024 * 1024
         add_days = plan['days']
-        try: reset_strategy = plan['reset_strategy'] if 'reset_strategy' in plan.keys() else 'NO_RESET'
-        except: reset_strategy = 'NO_RESET'
+        
+        # 🟢 逻辑优化：如果是周期重置流量，续费时不增加流量
+        try: 
+            reset_strategy = plan['reset_strategy'] if 'reset_strategy' in plan.keys() else 'NO_RESET'
+        except: 
+            reset_strategy = 'NO_RESET'
+            
         try:
             if order_type == 'renew':
+                if not target_uuid:
+                    await query.edit_message_text("⚠️ 订单数据已过期", reply_markup=admin_return_btn)
+                    return
+                    
                 user_info = await get_panel_user(target_uuid)
                 if not user_info:
                     await query.edit_message_text("⚠️ 用户不存在", reply_markup=admin_return_btn)
@@ -571,10 +631,18 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if current_expire > now: new_expire = current_expire + datetime.timedelta(days=add_days)
                 else: new_expire = now + datetime.timedelta(days=add_days)
                 expire_iso = new_expire.strftime("%Y-%m-%dT%H:%M:%SZ")
-                new_limit = user_info.get('trafficLimitBytes', 0) + add_traffic
+                
+                # 只有非重置策略才叠加流量，否则保持原样（面板自动重置）
+                new_limit = user_info.get('trafficLimitBytes', 0)
+                if reset_strategy == 'NO_RESET':
+                    new_limit += add_traffic
+                
                 update_payload = {
-                    "uuid": target_uuid, "trafficLimitBytes": new_limit, 
-                    "expireAt": expire_iso, "status": "ACTIVE", "activeInternalSquads": [TARGET_GROUP_UUID],
+                    "uuid": target_uuid, 
+                    "trafficLimitBytes": new_limit, 
+                    "expireAt": expire_iso, 
+                    "status": "ACTIVE", 
+                    "activeInternalSquads": [TARGET_GROUP_UUID],
                     "trafficLimitStrategy": reset_strategy
                 }
                 async with httpx.AsyncClient(verify=False) as client:
@@ -643,7 +711,9 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
             ex_dt = datetime.datetime.strptime(ex_str, "%Y-%m-%dT%H:%M:%S")
             days_left = (ex_dt - now).days
             if 0 <= days_left <= notify_days:
-                kb = [[InlineKeyboardButton("💳 立即续费", callback_data=f"selrenew_{sub['uuid']}")]]
+                # 同样的短ID逻辑用于提醒按钮
+                sid = get_short_id(sub['uuid'])
+                kb = [[InlineKeyboardButton("💳 立即续费", callback_data=f"selrenew_{sid}")]]
                 msg = f"⚠️ **续费提醒**\n\n您的订阅 (UUID: `{sub['uuid'][:8]}...`) \n将在 **{days_left}** 天后到期。\n请及时续费以免服务中断。"
                 try: await context.bot.send_message(sub['tg_id'], msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
                 except: pass
@@ -683,5 +753,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(process_order, pattern="^(ap|rj)_"))
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     app.job_queue.run_daily(check_expiry_job, time=datetime.time(hour=12, minute=0, second=0))
-    print(f"🚀 RemnaShop-Pro V1.6 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V1.7 已启动 | 监听中...")
     app.run_polling()
