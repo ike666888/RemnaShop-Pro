@@ -41,59 +41,47 @@
 ```bash
 bash <(curl -sL [https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/install.sh](https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/install.sh))
 ```
-安装步骤说明：
-运行脚本后，选择 1. 🛠 安装 / 更新。
+### 安装步骤说明：
+1.  运行脚本后，选择 `1. 🛠 安装 / 更新`。
+2.  脚本会自动安装 `python3`、`pip` 及所需依赖库。
+3.  **首次安装**会依次询问以下配置信息，请按提示输入：
+    * 管理员 TG ID
+    * 机器人 Token
+    * 面板地址 (例如 `https://panel.example.com`)
+    * 面板 API Token
+    * 订阅域名
+    * 默认用户组 UUID
+4.  安装完成后，机器人会自动启动并设置为开机自启。
 
-脚本会自动安装 python3、pip 及所需依赖库。
+---
 
-首次安装会依次询问以下配置信息，请按提示输入：
+## 📖 使用指南 (Usage)
 
-管理员 TG ID
+### 👮‍♂️ 管理员指令
+* `/start` - 唤出管理控制台。
+* **📦 套餐管理**：添加、删除售卖套餐，设置流量重置策略。
+* **👥 用户列表**：查看最近订阅用户，支持一键删除。
+* **🔔 提醒设置**：配置到期前第几天发送提醒。
+* **🗑 清理设置**：配置过期后第几天自动删除用户。
 
-机器人 Token
+### 👤 用户端功能
+* **🛒 购买订阅**：选择套餐 -> 发送口令红包 -> 等待审核 -> 自动发货。
+* **🔍 我的订阅**：查看流量进度条、到期时间，获取订阅链接及二维码。
+* **🌍 节点状态**：查看节点存活情况。
+* **🆘 联系客服**：向管理员发送消息（支持图文），管理员可直接回复。
 
-面板地址 (例如 https://panel.example.com)
+---
 
-面板 API Token
+## ⚙️ 目录结构
 
-订阅域名
+* **程序目录**：`/opt/RemnaShop`
+* **配置文件**：`/opt/RemnaShop/config.json` (自动生成)
+* **数据库**：`/opt/RemnaShop/starlight.db` (SQLite)
+* **服务名称**：`remnashop.service`
 
-默认用户组 UUID
+### 常用维护命令
 
-安装完成后，机器人会自动启动并设置为开机自启。
-
-📖 使用指南 (Usage)
-👮‍♂️ 管理员指令
-/start - 唤出管理控制台。
-
-📦 套餐管理：添加、删除售卖套餐，设置流量重置策略。
-
-👥 用户列表：查看最近订阅用户，支持一键删除。
-
-🔔 提醒设置：配置到期前第几天发送提醒。
-
-🗑 清理设置：配置过期后第几天自动删除用户。
-
-👤 用户端功能
-🛒 购买订阅：选择套餐 -> 发送口令红包 -> 等待审核 -> 自动发货。
-
-🔍 我的订阅：查看流量进度条、到期时间，获取订阅链接及二维码。
-
-🌍 节点状态：查看节点存活情况。
-
-🆘 联系客服：向管理员发送消息（支持图文），管理员可直接回复。
-
-⚙️ 目录结构
-程序目录：/opt/RemnaShop
-
-配置文件：/opt/RemnaShop/config.json (自动生成)
-
-数据库：/opt/RemnaShop/starlight.db (SQLite)
-
-服务名称：remnashop.service
-
-常用维护命令
-Bash
+```bash
 # 查看运行日志
 journalctl -u remnashop -f
 
@@ -102,9 +90,3 @@ systemctl restart remnashop
 
 # 停止机器人
 systemctl stop remnashop
-📞 联系与支持
-作者：ike
-
-交流群组：点击加入 Remnawave 中文交流群
-
-本项目仅供学习交流使用，请遵守当地法律法规。
