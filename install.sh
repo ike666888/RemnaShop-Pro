@@ -17,7 +17,7 @@ fi
 show_menu() {
     clear
     echo -e "${GREEN}=============================================${NC}"
-    echo -e "${GREEN}        RemnaShop-Pro 管理脚本 V1.8          ${NC}"
+    echo -e "${GREEN}        RemnaShop-Pro 管理脚本 V1.9          ${NC}"
     echo -e "${GREEN}=============================================${NC}"
     echo -e "1. 🛠  安装 / 更新 (保留数据库)"
     echo -e "2. 🗑  卸载全部 (删除数据)"
