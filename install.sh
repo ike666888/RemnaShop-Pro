@@ -17,7 +17,7 @@ fi
 show_menu() {
     clear
     echo -e "${GREEN}=============================================${NC}"
-    echo -e "${GREEN}       RemnaShop-Pro 管理脚本 V2.0           ${NC}"
+    echo -e "${GREEN}       RemnaShop-Pro 管理脚本 V2.1           ${NC}"
     echo -e "${GREEN}=============================================${NC}"
     echo -e "1. 🛠  安装 / 更新 (保留数据库)"
     echo -e "2. 🗑  卸载全部 (删除数据)"
@@ -29,10 +29,24 @@ show_menu() {
 install_bot() {
     echo -e "${YELLOW}>>> 开始安装流程...${NC}"
 
-    # 1. 环境检查
+    # 1. 环境检查与安装 (修复 pip3 缺失问题)
+    echo -e "${YELLOW}正在检查环境依赖...${NC}"
+    
+    # 更新软件源
+    if [ ! -f "/var/lib/apt/lists/lock" ]; then
+        apt-get update -y
+    fi
+
+    # 检查并安装 Python3
     if ! command -v python3 &> /dev/null; then
-        echo -e "${YELLOW}正在安装 Python3...${NC}"
-        apt-get update && apt-get install -y python3 python3-pip
+        echo -e "${YELLOW}未检测到 Python3，正在安装...${NC}"
+        apt-get install -y python3
+    fi
+
+    # 🟢 修复核心：单独检查并安装 pip3
+    if ! command -v pip3 &> /dev/null; then
+        echo -e "${YELLOW}未检测到 pip3，正在安装...${NC}"
+        apt-get install -y python3-pip
     fi
 
     # 2. 依赖安装
@@ -47,6 +61,7 @@ install_bot() {
 
     # 4. 下载代码
     echo -e "${YELLOW}正在拉取最新代码...${NC}"
+    # 替换为你的 GitHub 用户名
     curl -o $WORK_DIR/bot.py https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/bot.py
 
     # 5. 自动赋权
