@@ -96,7 +96,11 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS plans (key TEXT PRIMARY KEY, name TEXT, price TEXT, days INTEGER, gb INTEGER, reset_strategy TEXT)''')
+    # 🟢 升级：增加 plan_key 字段用于锁定续费套餐
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, uuid TEXT, created_at TIMESTAMP)''')
+    try: c.execute("ALTER TABLE subscriptions ADD COLUMN plan_key TEXT")
+    except: pass
+    
     c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
     try: c.execute("ALTER TABLE plans ADD COLUMN reset_strategy TEXT DEFAULT 'NO_RESET'")
     except: pass
@@ -182,9 +186,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id == ADMIN_ID:
         try:
             val_notify = db_query("SELECT value FROM settings WHERE key='notify_days'", one=True)
-            notify_days = val_notify['value'] if val_notify else 3
+            notify_days = int(val_notify['value']) if val_notify else 3
             val_cleanup = db_query("SELECT value FROM settings WHERE key='cleanup_days'", one=True)
-            cleanup_days = val_cleanup['value'] if val_cleanup else 7
+            cleanup_days = int(val_cleanup['value']) if val_cleanup else 7
         except: notify_days = 3; cleanup_days = 7
         msg_text = (f"👮‍♂️ **管理员控制台**\n🔔 提醒设置：提前 {notify_days} 天\n🗑 清理设置：过期 {cleanup_days} 天")
         keyboard = [
@@ -217,7 +221,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "client_nodes":
-        try: await query.edit_message_text("🔄 正在获取节点数据...")
+        try: await query.edit_message_text("🔄 正在获取节点状态...")
         except: pass
         nodes = await get_nodes_status()
         msg_list = ["🌍 **节点状态**\n"]
@@ -247,12 +251,11 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         keyboard = []
         plans = db_query("SELECT * FROM plans")
         for p in plans:
-            # 🟢 修复报错核心：Row对象转dict后再get
-            p_dict = dict(p)
+            p_dict = dict(p) # 🟢 修复报错：转字典
             strategy = p_dict.get('reset_strategy', 'NO_RESET')
             strategy_label = get_strategy_label(strategy)
-            btn_text = f"{p['name']} | {p['price']} | {p['gb']}G ({strategy_label})"
-            action = f"order_{p['key']}_new_0"
+            btn_text = f"{p_dict['name']} | {p_dict['price']} | {p_dict['gb']}G ({strategy_label})"
+            action = f"order_{p_dict['key']}_new_0"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
         await send_or_edit_menu(update, context, "🛒 **请选择新购套餐：**", InlineKeyboardMarkup(keyboard))
@@ -321,14 +324,31 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not target_uuid:
             await query.answer("❌ 信息过期")
             return
+        
+        # 🟢 核心修复：自动锁定原套餐续费
+        sub_record = db_query("SELECT * FROM subscriptions WHERE uuid = ?", (target_uuid,), one=True)
+        original_plan_key = None
+        if sub_record:
+            sub_dict = dict(sub_record)
+            original_plan_key = sub_dict.get('plan_key')
+        
+        # 如果找到了原套餐且该套餐还存在
+        if original_plan_key:
+            plan = db_query("SELECT * FROM plans WHERE key = ?", (original_plan_key,), one=True)
+            if plan:
+                # 直接跳转到订单确认
+                await handle_order_confirmation(update, context, original_plan_key, 'renew', short_id)
+                return
+
+        # 降级逻辑：如果没找到原套餐（老数据），展示列表让用户选
         keyboard = []
         plans = db_query("SELECT * FROM plans")
         for p in plans:
             p_dict = dict(p)
             strategy = p_dict.get('reset_strategy', 'NO_RESET')
             strategy_label = get_strategy_label(strategy)
-            btn_text = f"{p['name']} | {p['price']} | {p['gb']}G ({strategy_label})"
-            action = f"order_{p['key']}_renew_{short_id}"
+            btn_text = f"{p_dict['name']} | {p_dict['price']} | {p_dict['gb']}G ({strategy_label})"
+            action = f"order_{p_dict['key']}_renew_{short_id}"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回列表", callback_data="client_status")])
         await send_or_edit_menu(update, context, "🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", InlineKeyboardMarkup(keyboard))
@@ -339,34 +359,48 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         order_type = parts[2]
         if order_type == 'renew':
             short_id = parts[3]
-            target_uuid = get_real_uuid(short_id)
         else:
-            target_uuid = "0"
-        plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
-        if not plan: return
+            short_id = "0"
         
-        # Row 转 dict 防止 get 报错
-        plan_dict = dict(plan)
-        strategy = plan_dict.get('reset_strategy', 'NO_RESET')
-        strategy_label = get_strategy_label(strategy)
-        
-        temp_orders[user_id] = {"plan": plan_key, "type": order_type, "target_uuid": target_uuid, "menu_msg_id": query.message.message_id}
-        type_str = "续费" if order_type == 'renew' else "新购"
-        back_data = "client_buy_new" if order_type == 'new' else f"selrenew_{short_id}" if order_type == 'renew' else "back_home"
-        keyboard = [[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")], [InlineKeyboardButton("🔙 重选套餐", callback_data=back_data)]]
-        msg = (f"📝 **订单确认 ({type_str})**\n📦 套餐：{plan['name']}\n💰 金额：**{plan['price']}**\n📡 流量：**{plan['gb']} GB ({strategy_label})**\n\n💳 **下一步：**\n请在此直接发送 **支付宝口令红包** (文字) 给机器人。\n👇 👇 👇")
-        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
+        await handle_order_confirmation(update, context, plan_key, order_type, short_id)
 
     elif data == "cancel_order":
         if user_id in temp_orders: del temp_orders[user_id]
         await start(update, context)
 
+async def handle_order_confirmation(update, context, plan_key, order_type, short_id):
+    user_id = update.effective_user.id
+    target_uuid = get_real_uuid(short_id) if short_id != "0" else "0"
+    
+    plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
+    if not plan: return
+    
+    plan_dict = dict(plan)
+    strategy = plan_dict.get('reset_strategy', 'NO_RESET')
+    strategy_label = get_strategy_label(strategy)
+    
+    temp_orders[user_id] = {
+        "plan": plan_key, 
+        "type": order_type, 
+        "target_uuid": target_uuid,
+        "menu_msg_id": update.callback_query.message.message_id
+    }
+    
+    type_str = "续费" if order_type == 'renew' else "新购"
+    # 如果是自动跳转的续费，返回键应该回详情页；否则回主页
+    back_data = f"view_sub_{short_id}" if order_type == 'renew' else "client_buy_new"
+    
+    keyboard = [[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")], [InlineKeyboardButton("🔙 返回", callback_data=back_data)]]
+    msg = (f"📝 **订单确认 ({type_str})**\n📦 套餐：{plan_dict['name']}\n💰 金额：**{plan_dict['price']}**\n📡 流量：**{plan_dict['gb']} GB ({strategy_label})**\n\n💳 **下一步：**\n请在此直接发送 **支付宝口令红包** (文字) 给机器人。\n👇 👇 👇")
+    await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
+
 async def show_plans_menu(update, context):
     plans = db_query("SELECT * FROM plans")
     keyboard = []
     for p in plans:
-        btn_text = f"{p['name']} | {p['price']} | {p['gb']}G"
-        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"plan_detail_{p['key']}")])
+        p_dict = dict(p)
+        btn_text = f"{p_dict['name']} | {p_dict['price']} | {p_dict['gb']}G"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"plan_detail_{p_dict['key']}")])
     keyboard.append([InlineKeyboardButton("➕ 添加新套餐", callback_data="add_plan_start")])
     keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
     await send_or_edit_menu(update, context, "📦 **套餐管理**\n点击套餐查看详情或删除。", InlineKeyboardMarkup(keyboard))
@@ -407,12 +441,11 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         p = db_query("SELECT * FROM plans WHERE key = ?", (key,), one=True)
         if not p: return
         try:
-            # 🟢 修复报错
             p_dict = dict(p)
             strategy = p_dict.get('reset_strategy', 'NO_RESET')
             s_text = get_strategy_label(strategy)
         except: s_text = '总流量'
-        msg = f"📦 **套餐详情**\n\n🏷 名称：`{p['name']}`\n💰 价格：`{p['price']}`\n⏳ 时长：`{p['days']} 天`\n📡 流量：`{p['gb']} GB`\n🔄 策略：`{s_text}`"
+        msg = f"📦 **套餐详情**\n\n🏷 名称：`{p_dict['name']}`\n💰 价格：`{p_dict['price']}`\n⏳ 时长：`{p_dict['days']} 天`\n📡 流量：`{p_dict['gb']} GB`\n🔄 策略：`{s_text}`"
         keyboard = [[InlineKeyboardButton("🗑 删除此套餐", callback_data=f"del_plan_{key}")], [InlineKeyboardButton("🔙 返回列表", callback_data="admin_plans_list")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
     elif data.startswith("del_plan_"):
@@ -430,7 +463,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         panel_info = await get_panel_user(target_uuid)
         status = "🟢 面板正常" if panel_info else "🔴 面板已删"
-        msg = (f"👤 **用户详情**\nTG ID: `{sub['tg_id']}`\n状态: {status}\nUUID: `{target_uuid}`")
+        msg = (f"👤 **用户详情**\nTG ID: `{dict(sub)['tg_id']}`\n状态: {status}\nUUID: `{target_uuid}`")
         keyboard = [[InlineKeyboardButton("🔄 重置流量", callback_data=f"reset_traffic_{target_uuid}")], [InlineKeyboardButton("🗑 确认删除用户", callback_data=f"confirm_del_user_{target_uuid}")], [InlineKeyboardButton("🔙 返回列表", callback_data="admin_users_list")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
     elif data.startswith("reset_traffic_"):
@@ -492,10 +525,11 @@ async def show_users_list(update, context):
     users = db_query("SELECT * FROM subscriptions ORDER BY created_at DESC LIMIT 20")
     keyboard = []
     for u in users:
-        ts = u['created_at']
+        u_dict = dict(u)
+        ts = u_dict['created_at']
         date_str = datetime.datetime.fromtimestamp(int(ts)).strftime('%m-%d')
-        btn_text = f"🆔 {u['tg_id']} | {date_str}"
-        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"manage_user_{u['uuid']}")])
+        btn_text = f"🆔 {u_dict['tg_id']} | {date_str}"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"manage_user_{u_dict['uuid']}")])
     keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
     await send_or_edit_menu(update, context, "👥 **用户管理 (最近20条)**\n点击用户进行管理：", InlineKeyboardMarkup(keyboard))
 
@@ -576,7 +610,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = temp_orders[user_id]
         plan = db_query("SELECT * FROM plans WHERE key = ?", (order['plan'],), one=True)
         t_str = "续费" if order['type'] == 'renew' else "新购"
-        admin_msg = f"💰 **审核 {t_str}**\n👤 {update.effective_user.mention_html()} (`{user_id}`)\n📦 {plan['name']}\n📝 口令：<code>{text}</code>"
+        admin_msg = f"💰 **审核 {t_str}**\n👤 {update.effective_user.mention_html()} (`{user_id}`)\n📦 {dict(plan)['name']}\n📝 口令：<code>{text}</code>"
         safe_uuid = order['target_uuid'] if order['target_uuid'] else "0"
         sid = get_short_id(safe_uuid) if safe_uuid != "0" else "0"
         kb = [[InlineKeyboardButton("✅ 通过", callback_data=f"ap_{user_id}_{order['plan']}_{order['type']}_{sid}")], [InlineKeyboardButton("❌ 拒绝", callback_data=f"rj_{user_id}")]]
@@ -625,14 +659,11 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_text("🔄 处理中...")
         headers = get_headers()
-        add_traffic = plan['gb'] * 1024 * 1024 * 1024
-        add_days = plan['days']
-        
-        # 🟢 修复报错
         plan_dict = dict(plan)
+        add_traffic = plan_dict['gb'] * 1024 * 1024 * 1024
+        add_days = plan_dict['days']
         try: reset_strategy = plan_dict.get('reset_strategy', 'NO_RESET')
         except: reset_strategy = 'NO_RESET'
-        
         try:
             if order_type == 'renew':
                 if not target_uuid:
@@ -684,12 +715,13 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if r and r.status_code in [200, 201]:
                     resp_data = r.json().get('response', r.json())
                     user_uuid = resp_data.get('uuid')
-                    db_execute("INSERT INTO subscriptions (tg_id, uuid, created_at) VALUES (?, ?, ?)", 
-                               (uid, user_uuid, int(time.time())))
+                    # 🟢 修复核心：保存 plan_key 到数据库
+                    db_execute("INSERT INTO subscriptions (tg_id, uuid, created_at, plan_key) VALUES (?, ?, ?, ?)", 
+                               (uid, user_uuid, int(time.time()), plan_key))
                     await query.edit_message_text(f"✅ 开通成功\n用户: {uid}", reply_markup=admin_return_btn)
                     sub_url = resp_data.get('subscriptionUrl', '')
                     display_expire = format_time(expire_iso)
-                    msg = (f"🎉 **订阅开通成功！**\n\n📦 套餐：{plan['name']}\n⏳ 到期时间：`{display_expire}`\n📡 包含流量：`{plan['gb']} GB`\n\n🔗 订阅链接：\n`{sub_url}`")
+                    msg = (f"🎉 **订阅开通成功！**\n\n📦 套餐：{plan_dict['name']}\n⏳ 到期时间：`{display_expire}`\n📡 包含流量：`{plan_dict['gb']} GB`\n\n🔗 订阅链接：\n`{sub_url}`")
                     await clean_user_waiting_msg(uid)
                     if sub_url and sub_url.startswith('http'):
                         qr = generate_qr(sub_url)
@@ -707,7 +739,9 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
         notify_days = int(val['value']) if val else 3
         val_clean = db_query("SELECT value FROM settings WHERE key='cleanup_days'", one=True)
         cleanup_days = int(val_clean['value']) if val_clean else 7
-    except: notify_days = 3; cleanup_days = 7
+    except: 
+        notify_days = 3
+        cleanup_days = 7
     subs = db_query("SELECT * FROM subscriptions")
     if not subs: return
     now = datetime.datetime.utcnow()
@@ -715,24 +749,25 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
     sem = asyncio.Semaphore(10)
     async def check_single_sub(sub):
         async with sem:
-            info = await get_panel_user(sub['uuid'])
+            u_dict = dict(sub)
+            info = await get_panel_user(u_dict['uuid'])
             if not info: return
             try:
                 ex_str = info.get('expireAt', '').split('.')[0].replace('Z','')
                 ex_dt = datetime.datetime.strptime(ex_str, "%Y-%m-%dT%H:%M:%S")
                 days_left = (ex_dt - now).days
                 if 0 <= days_left <= notify_days:
-                    sid = get_short_id(sub['uuid'])
+                    sid = get_short_id(u_dict['uuid'])
                     kb = [[InlineKeyboardButton("💳 立即续费", callback_data=f"selrenew_{sid}")]]
-                    msg = f"⚠️ **续费提醒**\n\n您的订阅 (UUID: `{sub['uuid'][:8]}...`) \n将在 **{days_left}** 天后到期。\n请及时续费以免服务中断。"
-                    try: await context.bot.send_message(sub['tg_id'], msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+                    msg = f"⚠️ **续费提醒**\n\n您的订阅 (UUID: `{u_dict['uuid'][:8]}...`) \n将在 **{days_left}** 天后到期。\n请及时续费以免服务中断。"
+                    try: await context.bot.send_message(u_dict['tg_id'], msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
                     except: pass
                 if days_left == -1 and info.get('status') == 'active':
-                    await safe_api_request('POST', f"/users/{sub['uuid']}/actions/disable")
+                    await safe_api_request('POST', f"/users/{u_dict['uuid']}/actions/disable")
                 if days_left < -cleanup_days:
-                    to_delete_uuids.append(sub['uuid'])
-                    db_execute("DELETE FROM subscriptions WHERE uuid = ?", (sub['uuid'],))
-                    try: await context.bot.send_message(sub['tg_id'], f"🗑 您的订阅因过期超过 {cleanup_days} 天已被系统回收。")
+                    to_delete_uuids.append(u_dict['uuid'])
+                    db_execute("DELETE FROM subscriptions WHERE uuid = ?", (u_dict['uuid'],))
+                    try: await context.bot.send_message(u_dict['tg_id'], f"🗑 您的订阅因过期超过 {cleanup_days} 天已被系统回收。")
                     except: pass
             except Exception as e: pass
     tasks = [check_single_sub(sub) for sub in subs]
@@ -799,5 +834,5 @@ if __name__ == '__main__':
                 loop.create_task(reschedule_anomaly_job(app, val_int['value']))
     except: pass
 
-    print(f"🚀 RemnaShop-Pro V2.1 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V2.2 已启动 | 监听中...")
     app.run_polling()
