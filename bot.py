@@ -36,7 +36,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 user_cooldowns = {}
-COOLDOWN_SECONDS = 2.0
+COOLDOWN_SECONDS = 1.5
 
 def check_cooldown(user_id):
     if user_id == ADMIN_ID: return True
@@ -102,13 +102,15 @@ async def get_nodes_status():
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
             resp = await client.get(url, headers=get_headers())
             if resp.status_code == 200:
-                # 兼容部分面板返回 {data: [...]} 结构
                 data = resp.json()
                 if 'response' in data: return data['response']
                 if 'data' in data: return data['data']
                 if isinstance(data, list): return data
                 return []
-    except: pass
+            else:
+                logger.error(f"Get Nodes Failed: {resp.status_code} - {resp.text}")
+    except Exception as e:
+        logger.error(f"Get Nodes Exception: {e}")
     return []
 
 def format_time(iso_str):
@@ -185,16 +187,18 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text("🔄 正在获取节点状态，请稍候...")
         nodes = await get_nodes_status()
         if not nodes:
-            await query.edit_message_text("⚠️ 暂时无法获取节点信息。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+            await query.edit_message_text("⚠️ 暂时无法获取节点信息或API响应为空。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
             return
         
         msg_list = ["🌍 **节点状态实时监控**\n"]
         for node in nodes:
             name = node.get('name', '未知节点')
-            # 兼容多种在线状态字段
+            status_raw = str(node.get('status', '')).lower()
+            is_connected = node.get('connected', False)
+            
             is_online = False
-            if node.get('status') in ['connected', 'healthy', 'online', 'available']: is_online = True
-            if node.get('connected') is True: is_online = True
+            if status_raw in ['connected', 'healthy', 'online', 'active', 'true', '1']: is_online = True
+            if is_connected: is_online = True
             
             status = "🟢 在线" if is_online else "🔴 离线"
             msg_list.append(f"• {name} | {status}")
@@ -229,42 +233,53 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.edit_message_text("❌ 您名下没有订阅。\n请点击“购买新订阅”。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
             return
         
+        keyboard = []
+        for i, sub in enumerate(subs):
+            uuid_short = sub['uuid'][:8]
+            keyboard.append([InlineKeyboardButton(f"📦 订阅 #{i+1} (UUID: {uuid_short}..)", callback_data=f"view_sub_{sub['uuid']}")])
+        
+        keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
+        await query.edit_message_text("👤 **我的订阅列表**\n请点击下方按钮查看详情：", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data.startswith("view_sub_"):
+        target_uuid = data.split("_")[2]
+        await query.answer("🔄 加载详情中...")
+        
+        # 删除列表消息，准备发图
         try: await query.delete_message()
         except: pass
 
-        for i, sub in enumerate(subs):
-            uuid = sub['uuid']
-            info = await get_panel_user(uuid)
-            if not info:
-                await context.bot.send_message(user_id, f"⚠️ **订阅 #{i+1}** (已被删除)", parse_mode='Markdown')
-                continue
-            
-            expire_show = format_time(info.get('expireAt'))
-            limit = info.get('trafficLimitBytes', 0)
-            used = info.get('userTraffic', {}).get('usedTrafficBytes', 0)
-            limit_gb = round(limit / (1024**3), 2)
-            remain_gb = round((limit - used) / (1024**3), 2)
-            sub_url = info.get('subscriptionUrl', '无链接')
-            progress = draw_progress_bar(used, limit)
-            
-            caption = (
-                f"➖➖ **订阅 #{i+1}** ➖➖\n"
-                f"📊 流量：`{progress}`\n"
-                f"🔋 剩余：`{remain_gb} GB` / `{limit_gb} GB`\n"
-                f"⏳ 到期：`{expire_show}`\n"
-                f"🔗 订阅链接：\n`{sub_url}`"
-            )
-            # 合并续费和返回按钮到同一个键盘
-            keyboard = [
-                [InlineKeyboardButton(f"💳 续费此订阅", callback_data=f"selrenew_{uuid}")],
-                [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]
-            ]
-            
-            if sub_url and sub_url.startswith('http'):
-                qr_bio = generate_qr(sub_url)
-                await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-            else:
-                await context.bot.send_message(chat_id=user_id, text=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        info = await get_panel_user(target_uuid)
+        if not info:
+            await context.bot.send_message(user_id, "⚠️ 此订阅已被删除。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回列表", callback_data="client_status")]]))
+            return
+
+        expire_show = format_time(info.get('expireAt'))
+        limit = info.get('trafficLimitBytes', 0)
+        used = info.get('userTraffic', {}).get('usedTrafficBytes', 0)
+        limit_gb = round(limit / (1024**3), 2)
+        remain_gb = round((limit - used) / (1024**3), 2)
+        sub_url = info.get('subscriptionUrl', '无链接')
+        progress = draw_progress_bar(used, limit)
+
+        caption = (
+            f"📃 **订阅详情**\n\n"
+            f"📊 流量：`{progress}`\n"
+            f"🔋 剩余：`{remain_gb} GB` / `{limit_gb} GB`\n"
+            f"⏳ 到期：`{expire_show}`\n"
+            f"🔗 订阅链接：\n`{sub_url}`"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton(f"💳 续费此订阅", callback_data=f"selrenew_{target_uuid}")],
+            [InlineKeyboardButton("🔙 返回列表", callback_data="client_status")]
+        ]
+
+        if sub_url and sub_url.startswith('http'):
+            qr_bio = generate_qr(sub_url)
+            await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await context.bot.send_message(chat_id=user_id, text=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data.startswith("selrenew_"):
         target_uuid = data.split("_")[1]
@@ -275,8 +290,15 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             action = f"order_{p['key']}_renew_{target_uuid}"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回列表", callback_data="client_status")])
-        try: await query.edit_message_text("🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-        except: await context.bot.send_message(user_id, "🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        
+        # 尝试编辑消息，如果因为是图片无法编辑则发送新消息
+        try:
+            await query.edit_message_text("🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        except:
+            # 删掉旧的图文消息，保持界面清爽
+            try: await query.delete_message()
+            except: pass
+            await context.bot.send_message(user_id, "🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     elif data.startswith("order_"):
         parts = data.split("_")
@@ -285,10 +307,19 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         target_uuid = parts[3]
         plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
         if not plan: return
-        temp_orders[user_id] = {"plan": plan_key, "type": order_type, "target_uuid": target_uuid}
+        
+        # 记录订单时保存上一个菜单的消息ID
+        temp_orders[user_id] = {
+            "plan": plan_key, 
+            "type": order_type, 
+            "target_uuid": target_uuid,
+            "menu_msg_id": query.message.message_id
+        }
+        
         type_str = "续费" if order_type == 'renew' else "新购"
         keyboard = [[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")], [InlineKeyboardButton("🔙 重选套餐", callback_data="client_buy_new" if order_type == 'new' else f"selrenew_{target_uuid}")]]
         msg = (f"📝 **订单确认 ({type_str})**\n📦 套餐：{plan['name']}\n💰 金额：**{plan['price']}**\n📡 流量：**{plan['gb']} GB**\n\n💳 **下一步：**\n请在此直接发送 **支付宝口令红包** (文字) 给机器人。\n👇 👇 👇")
+        
         try: await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         except: await context.bot.send_message(user_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
@@ -460,12 +491,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = temp_orders[user_id]
         plan = db_query("SELECT * FROM plans WHERE key = ?", (order['plan'],), one=True)
         t_str = "续费" if order['type'] == 'renew' else "新购"
-        # 修复口令复制：使用 <code> 标签
         admin_msg = f"💰 **审核 {t_str}**\n👤 {update.effective_user.mention_html()} (`{user_id}`)\n📦 {plan['name']}\n📝 口令：<code>{text}</code>"
         safe_uuid = order['target_uuid'] if order['target_uuid'] else "0"
         kb = [[InlineKeyboardButton("✅ 通过", callback_data=f"ap_{user_id}_{order['plan']}_{order['type']}_{safe_uuid}")], [InlineKeyboardButton("❌ 拒绝", callback_data=f"rj_{user_id}")]]
         await context.bot.send_message(ADMIN_ID, admin_msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         msg_obj = await update.message.reply_text("✅ 已提交，等待管理员确认。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]))
+        # 记录用户的等待消息ID，用于审核后删除
         temp_orders[user_id]['waiting_msg_id'] = msg_obj.message_id
 
 async def add_plan_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -476,18 +507,24 @@ async def add_plan_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if not check_cooldown(query.from_user.id):
-        await query.answer("⏳ 操作太快了，请休息一下", show_alert=False)
-        return
     await query.answer()
     data = query.data
     client_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
     admin_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
+    
+    # 清理函数：删除用户的“等待审核”和“订单确认”消息
     async def clean_user_waiting_msg(uid):
-        if uid in temp_orders and 'waiting_msg_id' in temp_orders[uid]:
-            try: await context.bot.delete_message(chat_id=uid, message_id=temp_orders[uid]['waiting_msg_id'])
-            except: pass
-        if uid in temp_orders: del temp_orders[uid]
+        if uid in temp_orders:
+            # 1. 删除 '等待管理员确认' 消息
+            if 'waiting_msg_id' in temp_orders[uid]:
+                try: await context.bot.delete_message(chat_id=uid, message_id=temp_orders[uid]['waiting_msg_id'])
+                except: pass
+            # 2. 删除 '订单确认(带取消按钮)' 的菜单消息
+            if 'menu_msg_id' in temp_orders[uid]:
+                try: await context.bot.delete_message(chat_id=uid, message_id=temp_orders[uid]['menu_msg_id'])
+                except: pass
+            del temp_orders[uid]
+
     if data.startswith("rj_"):
         uid = int(data.split("_")[1])
         await query.edit_message_text("❌ 已拒绝", reply_markup=admin_return_btn)
@@ -534,12 +571,21 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     r = await client.patch(f"{PANEL_URL}/users", json=update_payload, headers=headers)
                 if r.status_code in [200, 204]:
                     await query.edit_message_text(f"✅ 续费成功\n用户: {uid}", reply_markup=admin_return_btn)
-                    sub_url = user_info.get('subscriptionUrl', '请在"我的订阅"中查看')
+                    
+                    # 重新获取最新信息以展示
+                    sub_url = user_info.get('subscriptionUrl', '')
                     display_expire = format_time(expire_iso)
                     display_traffic = round(new_limit/1024**3, 2)
                     msg = (f"🎉 **续费成功！**\n\n⏳ 新到期时间：`{display_expire}`\n📡 当前总流量：`{display_traffic} GB`\n\n🔗 订阅链接：\n`{sub_url}`")
+                    
                     await clean_user_waiting_msg(uid)
-                    await context.bot.send_message(uid, msg, parse_mode='Markdown', reply_markup=client_return_btn)
+                    
+                    # 发送带二维码的成功消息
+                    if sub_url and sub_url.startswith('http'):
+                        qr = generate_qr(sub_url)
+                        await context.bot.send_photo(uid, photo=qr, caption=msg, parse_mode='Markdown', reply_markup=client_return_btn)
+                    else:
+                        await context.bot.send_message(uid, msg, parse_mode='Markdown', reply_markup=client_return_btn)
                 else:
                     await query.edit_message_text(f"❌ API报错: {r.text}", reply_markup=admin_return_btn)
             else:
@@ -558,11 +604,19 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     db_execute("INSERT INTO subscriptions (tg_id, uuid, created_at) VALUES (?, ?, ?)", 
                                (uid, user_uuid, int(time.time())))
                     await query.edit_message_text(f"✅ 开通成功\n用户: {uid}", reply_markup=admin_return_btn)
-                    sub_url = resp_data.get('subscriptionUrl', '请在"我的订阅"中查看')
+                    
+                    sub_url = resp_data.get('subscriptionUrl', '')
                     display_expire = format_time(expire_iso)
                     msg = (f"🎉 **订阅开通成功！**\n\n📦 套餐：{plan['name']}\n⏳ 到期时间：`{display_expire}`\n📡 包含流量：`{plan['gb']} GB`\n\n🔗 订阅链接：\n`{sub_url}`")
+                    
                     await clean_user_waiting_msg(uid)
-                    await context.bot.send_message(uid, msg, parse_mode='Markdown', reply_markup=client_return_btn)
+                    
+                    # 发送带二维码的成功消息
+                    if sub_url and sub_url.startswith('http'):
+                        qr = generate_qr(sub_url)
+                        await context.bot.send_photo(uid, photo=qr, caption=msg, parse_mode='Markdown', reply_markup=client_return_btn)
+                    else:
+                        await context.bot.send_message(uid, msg, parse_mode='Markdown', reply_markup=client_return_btn)
                 else:
                     await query.edit_message_text(f"❌ 失败: {r.text}", reply_markup=admin_return_btn)
         except Exception as e:
@@ -627,5 +681,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(process_order, pattern="^(ap|rj)_"))
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     app.job_queue.run_daily(check_expiry_job, time=datetime.time(hour=12, minute=0, second=0))
-    print(f"🚀 RemnaShop-Pro V1.3 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V1.4 已启动 | 监听中...")
     app.run_polling()
