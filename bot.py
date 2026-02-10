@@ -9,14 +9,13 @@ import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
-# ================== ⚙️ 配置加载 ==================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
 DB_FILE = os.path.join(BASE_DIR, 'starlight.db')
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
-        print(f"❌ 错误：找不到配置文件 {CONFIG_FILE}")
+        print(f"配置文件缺失: {CONFIG_FILE}")
         exit(1)
     with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
         return json.load(f)
@@ -30,7 +29,6 @@ PANEL_TOKEN = config['panel_token']
 SUB_DOMAIN = config['sub_domain'].rstrip('/')
 TARGET_GROUP_UUID = config['group_uuid']
 
-# ================== ⚙️ 初始化 ==================
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -40,21 +38,14 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS plans (key TEXT PRIMARY KEY, name TEXT, price TEXT, days INTEGER, gb INTEGER, reset_strategy TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, uuid TEXT, created_at TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-    
-    try: 
-        c.execute("ALTER TABLE plans ADD COLUMN reset_strategy TEXT DEFAULT 'NO_RESET'")
-    except: 
-        pass
-    
+    try: c.execute("ALTER TABLE plans ADD COLUMN reset_strategy TEXT DEFAULT 'NO_RESET'")
+    except: pass
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_days', '3')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cleanup_days', '3')")
-    
-    # 默认套餐示例
     c.execute("SELECT count(*) FROM plans")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO plans VALUES (?, ?, ?, ?, ?, ?)", ('p1', '1个月', '200元', 30, 100, 'NO_RESET'))
         c.execute("INSERT INTO plans VALUES (?, ?, ?, ?, ?, ?)", ('p2', '3个月', '580元', 90, 500, 'NO_RESET'))
-    
     conn.commit()
     conn.close()
 
@@ -78,7 +69,6 @@ def db_execute(query, args=()):
 init_db()
 temp_orders = {}
 
-# ================== 🌐 API 工具 ==================
 def get_headers():
     return {"Authorization": f"Bearer {PANEL_TOKEN}", "Content-Type": "application/json"}
 
@@ -100,13 +90,10 @@ def format_time(iso_str):
     except:
         return iso_str
 
-# ================== 🎮 Start ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     if update.effective_user.id in temp_orders: del temp_orders[update.effective_user.id]
-
     user_id = update.effective_user.id
-    
     if user_id == ADMIN_ID:
         try:
             val_notify = db_query("SELECT value FROM settings WHERE key='notify_days'", one=True)
@@ -116,12 +103,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             notify_days = 3
             cleanup_days = 3
-            
-        msg_text = (
-            f"👮‍♂️ **管理员控制台**\n"
-            f"🔔 提醒设置：到期前 {notify_days} 天\n"
-            f"🗑 自动清理：过期后 {cleanup_days} 天"
-        )
+        msg_text = (f"👮‍♂️ **管理员控制台**\n🔔 提醒设置：到期前 {notify_days} 天\n🗑 自动清理：过期后 {cleanup_days} 天")
         keyboard = [
             [InlineKeyboardButton("📦 套餐管理", callback_data="admin_plans_list")],
             [InlineKeyboardButton("👥 用户列表", callback_data="admin_users_list")],
@@ -134,7 +116,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔍 我的订阅 / 续费", callback_data="client_status")],
             [InlineKeyboardButton("🆘 联系客服", callback_data="contact_support")]
         ]
-    
     reply_markup = InlineKeyboardMarkup(keyboard)
     if update.callback_query:
         try: await update.callback_query.edit_message_text(text=msg_text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -142,24 +123,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(text=msg_text, reply_markup=reply_markup, parse_mode='Markdown')
 
-# ================== 🛒 客户端逻辑 ==================
 async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     user_id = query.from_user.id
-
     if data == "back_home":
         await start(update, context)
         return
-
     if data == "contact_support":
         context.user_data['chat_mode'] = 'support'
         msg = "📞 **客服模式已开启**\n请直接发送文字、图片或文件。\n🚪 结束咨询请点击下方按钮。"
         keyboard = [[InlineKeyboardButton("🚪 结束咨询", callback_data="back_home")]]
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         return
-
     if data == "client_buy_new":
         keyboard = []
         plans = db_query("SELECT * FROM plans")
@@ -171,25 +148,19 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
         await query.edit_message_text("🛒 **请选择新购套餐：**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-
     elif data == "client_status":
         subs = db_query("SELECT * FROM subscriptions WHERE tg_id = ?", (user_id,))
         if not subs:
-            await query.edit_message_text("❌ 您名下没有订阅。\n请点击“购买新订阅”。", 
-                                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+            await query.edit_message_text("❌ 您名下没有订阅。\n请点击“购买新订阅”。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
             return
-
         msg_list = []
         keyboard = []
-        
         for i, sub in enumerate(subs):
             uuid = sub['uuid']
             info = get_panel_user(uuid)
-            
             if not info:
                 msg_list.append(f"⚠️ **订阅 #{i+1}** (已被删除)")
                 continue
-
             expire_show = format_time(info.get('expireAt'))
             limit_gb = round(info.get('trafficLimitBytes', 0) / (1024**3), 2)
             used_gb = round(info.get('userTraffic', {}).get('usedTrafficBytes', 0) / (1024**3), 2)
@@ -198,20 +169,11 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             strategy = info.get('trafficLimitStrategy', 'NO_RESET')
             s_map = {'NO_RESET': '永不重置', 'DAY': '每日重置', 'WEEK': '每周重置', 'MONTH': '每月重置'}
             s_text = s_map.get(strategy, strategy)
-
-            msg_list.append(
-                f"➖➖ **订阅 #{i+1}** ➖➖\n"
-                f"⏳ 到期：`{expire_show}`\n"
-                f"🔋 剩余：`{remain_gb} GB`\n"
-                f"🔄 策略：{s_text}\n"
-                f"🔗 订阅链接：\n`{sub_url}`"
-            )
+            msg_list.append(f"➖➖ **订阅 #{i+1}** ➖➖\n⏳ 到期：`{expire_show}`\n🔋 剩余：`{remain_gb} GB`\n🔄 策略：{s_text}\n🔗 订阅链接：\n`{sub_url}`")
             keyboard.append([InlineKeyboardButton(f"💳 续费 订阅 #{i+1}", callback_data=f"selrenew_{uuid}")])
-
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
         full_msg = "👤 **我的订阅列表**\n" + "\n".join(msg_list)
         await query.edit_message_text(full_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown', disable_web_page_preview=True)
-
     elif data.startswith("selrenew_"):
         target_uuid = data.split("_")[1]
         keyboard = []
@@ -222,40 +184,22 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回列表", callback_data="client_status")])
         await query.edit_message_text("🔄 **请选择要续费的时长：**\n(流量和时间将自动叠加)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-
     elif data.startswith("order_"):
         parts = data.split("_")
         plan_key = parts[1]
         order_type = parts[2]
         target_uuid = parts[3]
-        
         plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
         if not plan: return
-
         temp_orders[user_id] = {"plan": plan_key, "type": order_type, "target_uuid": target_uuid}
         type_str = "续费" if order_type == 'renew' else "新购"
-        
-        keyboard = [
-            [InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")],
-            [InlineKeyboardButton("🔙 重选套餐", callback_data="client_buy_new" if order_type == 'new' else f"selrenew_{target_uuid}")]
-        ]
-        
-        msg = (
-            f"📝 **订单确认 ({type_str})**\n"
-            f"📦 套餐：{plan['name']}\n"
-            f"💰 金额：**{plan['price']}**\n"
-            f"📡 流量：**{plan['gb']} GB**\n\n"
-            f"💳 **下一步：**\n"
-            f"请在此直接发送 **支付宝口令红包** (文字) 给机器人。\n"
-            f"👇 👇 👇"
-        )
+        keyboard = [[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")], [InlineKeyboardButton("🔙 重选套餐", callback_data="client_buy_new" if order_type == 'new' else f"selrenew_{target_uuid}")]]
+        msg = (f"📝 **订单确认 ({type_str})**\n📦 套餐：{plan['name']}\n💰 金额：**{plan['price']}**\n📡 流量：**{plan['gb']} GB**\n\n💳 **下一步：**\n请在此直接发送 **支付宝口令红包** (文字) 给机器人。\n👇 👇 👇")
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-
     elif data == "cancel_order":
         if user_id in temp_orders: del temp_orders[user_id]
         await start(update, context)
 
-# ================== 👮‍♂️ 管理员功能 ==================
 async def show_plans_menu(update, context):
     plans = db_query("SELECT * FROM plans")
     keyboard = []
@@ -264,54 +208,43 @@ async def show_plans_menu(update, context):
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"plan_detail_{p['key']}")])
     keyboard.append([InlineKeyboardButton("➕ 添加新套餐", callback_data="add_plan_start")])
     keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
-    
-    if update.callback_query:
-        await update.callback_query.edit_message_text("📦 **套餐管理**\n点击套餐查看详情或删除。", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    if update.callback_query: await update.callback_query.edit_message_text("📦 **套餐管理**\n点击套餐查看详情或删除。", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-
     if data.startswith("reply_user_"):
         target_uid = int(data.split("_")[2])
         context.user_data['reply_to_uid'] = target_uid
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ 取消回复", callback_data="cancel_op")]])
         await query.message.reply_text(f"✍️ 请输入回复给用户 `{target_uid}` 的内容 (文字/图片)：", parse_mode='Markdown', reply_markup=cancel_kb)
         return
-
     if data == "cancel_op":
         context.user_data.clear()
         await start(update, context)
         return
-
     if data == "admin_plans_list":
         await show_plans_menu(update, context)
-
     elif data.startswith("plan_detail_"):
         key = data.split("_")[2]
         p = db_query("SELECT * FROM plans WHERE key = ?", (key,), one=True)
         if not p: return
-        
         try:
             s_map = {'NO_RESET': '永不重置', 'DAY': '每日重置', 'WEEK': '每周重置', 'MONTH': '每月重置'}
             reset_strategy = p['reset_strategy'] if 'reset_strategy' in p.keys() else 'NO_RESET'
             s_text = s_map.get(reset_strategy, 'NO_RESET')
         except: s_text = 'NO_RESET'
-        
         msg = f"📦 **套餐详情**\n\n🏷 名称：`{p['name']}`\n💰 价格：`{p['price']}`\n⏳ 时长：`{p['days']} 天`\n📡 流量：`{p['gb']} GB`\n🔄 策略：`{s_text}`"
         keyboard = [[InlineKeyboardButton("🗑 删除此套餐", callback_data=f"del_plan_{key}")], [InlineKeyboardButton("🔙 返回列表", callback_data="admin_plans_list")]]
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-
     elif data.startswith("del_plan_"):
         key = data.split("_")[2]
         db_execute("DELETE FROM plans WHERE key = ?", (key,))
         await query.answer("✅ 套餐已删除", show_alert=True)
         await show_plans_menu(update, context)
-
     elif data == "admin_users_list":
         await show_users_list(update, context)
-
     elif data.startswith("manage_user_"):
         target_uuid = data.replace("manage_user_", "")
         sub = db_query("SELECT * FROM subscriptions WHERE uuid = ?", (target_uuid,), one=True)
@@ -323,7 +256,6 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         msg = (f"👤 **用户详情**\nTG ID: `{sub['tg_id']}`\n状态: {status}\nUUID: `{target_uuid}`\n\n⚠️ **删除操作不可恢复！**")
         keyboard = [[InlineKeyboardButton("🗑 确认删除用户", callback_data=f"confirm_del_user_{target_uuid}")], [InlineKeyboardButton("🔙 返回列表", callback_data="admin_users_list")]]
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-
     elif data.startswith("confirm_del_user_"):
         target_uuid = data.replace("confirm_del_user_", "")
         try: requests.delete(f"{PANEL_URL}/users/{target_uuid}", headers=get_headers(), verify=False)
@@ -331,7 +263,6 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         db_execute("DELETE FROM subscriptions WHERE uuid = ?", (target_uuid,))
         await query.answer("✅ 用户已删除", show_alert=True)
         await show_users_list(update, context)
-
     elif data == "admin_notify":
         try:
             val = db_query("SELECT value FROM settings WHERE key='notify_days'", one=True)
@@ -340,7 +271,6 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         kb = [[InlineKeyboardButton("🔙 取消", callback_data="cancel_op")]]
         await query.edit_message_text(f"🔔 **提醒设置**\n当前：到期前 {day} 天发送提醒\n\n**⬇️ 请回复新的天数（纯数字）：**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         context.user_data['setting_notify'] = True
-
     elif data == "admin_cleanup":
         try:
             val = db_query("SELECT value FROM settings WHERE key='cleanup_days'", one=True)
@@ -349,13 +279,11 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         kb = [[InlineKeyboardButton("🔙 取消", callback_data="cancel_op")]]
         await query.edit_message_text(f"🗑 **清理设置**\n当前：过期后 {day} 天自动删除用户\n\n**⬇️ 请回复新的天数（纯数字）：**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         context.user_data['setting_cleanup'] = True
-
     elif data.startswith("set_strategy_"):
         strategy = data.replace("set_strategy_", "")
         new_plan = context.user_data['new_plan']
         key = f"p{int(time.time())}"
-        db_execute("INSERT INTO plans VALUES (?, ?, ?, ?, ?, ?)", 
-                   (key, new_plan['name'], new_plan['price'], new_plan['days'], new_plan['gb'], strategy))
+        db_execute("INSERT INTO plans VALUES (?, ?, ?, ?, ?, ?)", (key, new_plan['name'], new_plan['price'], new_plan['days'], new_plan['gb'], strategy))
         del context.user_data['add_plan_step']
         await query.edit_message_text(f"✅ **套餐添加成功！**\n{new_plan['name']} - {strategy}", parse_mode='Markdown')
         await asyncio.sleep(1)
@@ -374,12 +302,10 @@ async def show_users_list(update, context):
     if update.callback_query: await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else: await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-# ================== 📨 消息处理 ==================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
     cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]])
-
     if user_id == ADMIN_ID and 'reply_to_uid' in context.user_data:
         target_uid = context.user_data['reply_to_uid']
         try:
@@ -387,11 +313,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(target_uid, "👆 **(来自客服的回复)**", parse_mode='Markdown')
             admin_done_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
             await update.message.reply_text("✅ 回复已送达！", reply_markup=admin_done_kb)
-        except Exception as e:
-            await update.message.reply_text(f"❌ 发送失败：{e}")
+        except Exception as e: await update.message.reply_text(f"❌ 发送失败：{e}")
         del context.user_data['reply_to_uid']
         return
-
     if context.user_data.get('chat_mode') == 'support':
         admin_header = f"📨 **新客服消息**\n来自：{update.effective_user.mention_html()} (`{user_id}`)"
         reply_kb = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ 回复此用户", callback_data=f"reply_user_{user_id}")]])
@@ -399,7 +323,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.copy_message(chat_id=ADMIN_ID, from_chat_id=user_id, message_id=update.message.message_id)
         await update.message.reply_text("✅ 已转发")
         return
-
     if user_id == ADMIN_ID and context.user_data.get('setting_notify') and text:
         if text.isdigit():
             db_execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('notify_days', ?)", (text,))
@@ -407,7 +330,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ 已设置：到期前 {text} 天提醒。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         else: await update.message.reply_text("❌ 请输入数字", reply_markup=cancel_kb)
         return
-
     if user_id == ADMIN_ID and context.user_data.get('setting_cleanup') and text:
         if text.isdigit():
             db_execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('cleanup_days', ?)", (text,))
@@ -415,7 +337,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ 已设置：过期后 {text} 天自动删除。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         else: await update.message.reply_text("❌ 请输入数字", reply_markup=cancel_kb)
         return
-
     if user_id == ADMIN_ID and 'add_plan_step' in context.user_data and text:
         step = context.user_data['add_plan_step']
         if step == 'name':
@@ -434,26 +355,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == 'gb':
             if not text.isdigit(): return await update.message.reply_text("❌ 请输入数字", reply_markup=cancel_kb)
             context.user_data['new_plan']['gb'] = int(text)
-            keyboard = [
-                [InlineKeyboardButton("🚫 永不重置", callback_data="set_strategy_NO_RESET")],
-                [InlineKeyboardButton("📅 每日重置", callback_data="set_strategy_DAY")],
-                [InlineKeyboardButton("🗓 每周重置", callback_data="set_strategy_WEEK")],
-                [InlineKeyboardButton("🌝 每月重置", callback_data="set_strategy_MONTH")],
-                [InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]
-            ]
+            keyboard = [[InlineKeyboardButton("🚫 永不重置", callback_data="set_strategy_NO_RESET")], [InlineKeyboardButton("📅 每日重置", callback_data="set_strategy_DAY")], [InlineKeyboardButton("🗓 每周重置", callback_data="set_strategy_WEEK")], [InlineKeyboardButton("🌝 每月重置", callback_data="set_strategy_MONTH")], [InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]]
             await update.message.reply_text("🔄 **步骤 5/5：请选择流量重置策略**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         return
-
     if user_id in temp_orders and text:
         order = temp_orders[user_id]
         plan = db_query("SELECT * FROM plans WHERE key = ?", (order['plan'],), one=True)
         t_str = "续费" if order['type'] == 'renew' else "新购"
-        
         admin_msg = f"💰 **审核 {t_str}**\n👤 {update.effective_user.mention_html()} (`{user_id}`)\n📦 {plan['name']}\n📝 口令：`{text}`"
         safe_uuid = order['target_uuid'] if order['target_uuid'] else "0"
-        kb = [[InlineKeyboardButton("✅ 通过", callback_data=f"ap_{user_id}_{order['plan']}_{order['type']}_{safe_uuid}")], 
-              [InlineKeyboardButton("❌ 拒绝", callback_data=f"rj_{user_id}")]]
-        
+        kb = [[InlineKeyboardButton("✅ 通过", callback_data=f"ap_{user_id}_{order['plan']}_{order['type']}_{safe_uuid}")], [InlineKeyboardButton("❌ 拒绝", callback_data=f"rj_{user_id}")]]
         await context.bot.send_message(ADMIN_ID, admin_msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         msg_obj = await update.message.reply_text("✅ 已提交，等待管理员确认。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]))
         temp_orders[user_id]['waiting_msg_id'] = msg_obj.message_id
@@ -464,21 +375,17 @@ async def add_plan_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['add_plan_step'] = 'name'
     await query.edit_message_text("📝 **步骤 1/5：开始添加套餐**\n\n请输入套餐名称:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]]), parse_mode='Markdown')
 
-# ================== ⚡️ 订单执行 ==================
 async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    
     client_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
     admin_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
-
     async def clean_user_waiting_msg(uid):
         if uid in temp_orders and 'waiting_msg_id' in temp_orders[uid]:
             try: await context.bot.delete_message(chat_id=uid, message_id=temp_orders[uid]['waiting_msg_id'])
             except: pass
         if uid in temp_orders: del temp_orders[uid]
-
     if data.startswith("rj_"):
         uid = int(data.split("_")[1])
         await query.edit_message_text("❌ 已拒绝", reply_markup=admin_return_btn)
@@ -486,35 +393,28 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: await context.bot.send_message(uid, "❌ 您的订单已被管理员拒绝。", reply_markup=client_return_btn)
         except: pass
         return
-
     if data.startswith("ap_"):
         parts = data.split("_")
         uid = int(parts[1])
         plan_key = parts[2]
         order_type = parts[3]
         target_uuid = parts[4]
-        
         plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
         if not plan:
             await query.edit_message_text("❌ 套餐已删除", reply_markup=admin_return_btn)
             return
-
         await query.edit_message_text("🔄 处理中...")
         headers = get_headers()
         add_traffic = plan['gb'] * 1024 * 1024 * 1024
         add_days = plan['days']
-        
-        try:
-            reset_strategy = plan['reset_strategy'] if 'reset_strategy' in plan.keys() else 'NO_RESET'
+        try: reset_strategy = plan['reset_strategy'] if 'reset_strategy' in plan.keys() else 'NO_RESET'
         except: reset_strategy = 'NO_RESET'
-        
         try:
             if order_type == 'renew':
                 user_info = get_panel_user(target_uuid)
                 if not user_info:
                     await query.edit_message_text("⚠️ 用户不存在", reply_markup=admin_return_btn)
                     return
-                
                 current_expire_str = user_info.get('expireAt', '').split('.')[0].replace('Z', '')
                 now = datetime.datetime.utcnow()
                 try: current_expire = datetime.datetime.strptime(current_expire_str, "%Y-%m-%dT%H:%M:%S")
@@ -523,14 +423,12 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else: new_expire = now + datetime.timedelta(days=add_days)
                 expire_iso = new_expire.strftime("%Y-%m-%dT%H:%M:%SZ")
                 new_limit = user_info.get('trafficLimitBytes', 0) + add_traffic
-                
                 update_payload = {
                     "uuid": target_uuid, "trafficLimitBytes": new_limit, 
                     "expireAt": expire_iso, "status": "ACTIVE", "activeInternalSquads": [TARGET_GROUP_UUID],
                     "trafficLimitStrategy": reset_strategy
                 }
                 r = requests.patch(f"{PANEL_URL}/users", json=update_payload, headers=headers, verify=False)
-                
                 if r.status_code in [200, 204]:
                     await query.edit_message_text(f"✅ 续费成功\n用户: {uid}", reply_markup=admin_return_btn)
                     sub_url = user_info.get('subscriptionUrl', '请在"我的订阅"中查看')
@@ -541,7 +439,6 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(uid, msg, parse_mode='Markdown', reply_markup=client_return_btn)
                 else:
                     await query.edit_message_text(f"❌ API报错: {r.text}", reply_markup=admin_return_btn)
-
             else:
                 new_expire = datetime.datetime.utcnow() + datetime.timedelta(days=add_days)
                 expire_iso = new_expire.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -564,11 +461,9 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(uid, msg, parse_mode='Markdown', reply_markup=client_return_btn)
                 else:
                     await query.edit_message_text(f"❌ 失败: {r.text}", reply_markup=admin_return_btn)
-
         except Exception as e:
             await query.edit_message_text(f"❌ 错误: {e}", reply_markup=admin_return_btn)
 
-# ================== ⏰ 定时任务 ==================
 async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
     try: 
         val = db_query("SELECT value FROM settings WHERE key='notify_days'", one=True)
@@ -578,11 +473,9 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
     except: 
         notify_days = 3
         cleanup_days = 3
-    
     subs = db_query("SELECT * FROM subscriptions")
     if not subs: return
     now = datetime.datetime.utcnow()
-    
     for sub in subs:
         info = get_panel_user(sub['uuid'])
         if not info: continue
@@ -590,13 +483,11 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
             ex_str = info.get('expireAt', '').split('.')[0].replace('Z','')
             ex_dt = datetime.datetime.strptime(ex_str, "%Y-%m-%dT%H:%M:%S")
             days_left = (ex_dt - now).days
-            
             if 0 <= days_left <= notify_days:
                 kb = [[InlineKeyboardButton("💳 立即续费", callback_data=f"selrenew_{sub['uuid']}")]]
                 msg = f"⚠️ **续费提醒**\n\n您的订阅 (UUID: `{sub['uuid'][:8]}...`) \n将在 **{days_left}** 天后到期。\n请及时续费以免服务中断。"
                 try: await context.bot.send_message(sub['tg_id'], msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
                 except: pass
-            
             if days_left < -cleanup_days:
                 logger.info(f"自动清理用户: {sub['uuid']}")
                 try: requests.delete(f"{PANEL_URL}/users/{sub['uuid']}", headers=get_headers(), verify=False)
@@ -609,9 +500,7 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
 if __name__ == '__main__':
     requests.packages.urllib3.disable_warnings()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start))
-    
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^admin_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^del_plan_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^plan_detail_"))
@@ -621,17 +510,14 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^set_strategy_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^reply_user_")) 
     app.add_handler(CallbackQueryHandler(add_plan_start, pattern="^add_plan_start$"))
-    
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^client_"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^selrenew_"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^order_"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^cancel_order"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^back_home$"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^contact_support$"))
-    
     app.add_handler(CallbackQueryHandler(process_order, pattern="^(ap|rj)_"))
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
-    
     app.job_queue.run_daily(check_expiry_job, time=datetime.time(hour=12, minute=0, second=0))
     print(f"🚀 RemnaShop-Pro (星光数据库版) 服务已启动 | 监听中...")
     app.run_polling()
