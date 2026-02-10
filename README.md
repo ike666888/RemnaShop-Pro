@@ -39,7 +39,7 @@
 请在 VPS 终端执行以下命令：
 
 ```bash
-bash <(curl -sL [https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/install.sh](https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/install.sh))
+bash <(curl -sL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/install.sh)
 ```
 ### 安装步骤说明：
 1.  运行脚本后，选择 `1. 🛠 安装 / 更新`。
