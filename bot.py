@@ -96,7 +96,6 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS plans (key TEXT PRIMARY KEY, name TEXT, price TEXT, days INTEGER, gb INTEGER, reset_strategy TEXT)''')
-    # 🟢 升级：增加 plan_key 字段用于锁定续费套餐
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, uuid TEXT, created_at TIMESTAMP)''')
     try: c.execute("ALTER TABLE subscriptions ADD COLUMN plan_key TEXT")
     except: pass
@@ -251,7 +250,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         keyboard = []
         plans = db_query("SELECT * FROM plans")
         for p in plans:
-            p_dict = dict(p) # 🟢 修复报错：转字典
+            p_dict = dict(p) 
             strategy = p_dict.get('reset_strategy', 'NO_RESET')
             strategy_label = get_strategy_label(strategy)
             btn_text = f"{p_dict['name']} | {p_dict['price']} | {p_dict['gb']}G ({strategy_label})"
@@ -325,22 +324,19 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.answer("❌ 信息过期")
             return
         
-        # 🟢 核心修复：自动锁定原套餐续费
         sub_record = db_query("SELECT * FROM subscriptions WHERE uuid = ?", (target_uuid,), one=True)
         original_plan_key = None
         if sub_record:
             sub_dict = dict(sub_record)
             original_plan_key = sub_dict.get('plan_key')
         
-        # 如果找到了原套餐且该套餐还存在
         if original_plan_key:
             plan = db_query("SELECT * FROM plans WHERE key = ?", (original_plan_key,), one=True)
             if plan:
-                # 直接跳转到订单确认
+                # 🟢 修复图1：记录正确的菜单ID以便后续删除
                 await handle_order_confirmation(update, context, original_plan_key, 'renew', short_id)
                 return
 
-        # 降级逻辑：如果没找到原套餐（老数据），展示列表让用户选
         keyboard = []
         plans = db_query("SELECT * FROM plans")
         for p in plans:
@@ -379,15 +375,19 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
     strategy = plan_dict.get('reset_strategy', 'NO_RESET')
     strategy_label = get_strategy_label(strategy)
     
+    # 🟢 修复：尝试获取消息对象，无论是通过 callback 还是普通调用
+    msg_id = None
+    if update.callback_query and update.callback_query.message:
+        msg_id = update.callback_query.message.message_id
+    
     temp_orders[user_id] = {
         "plan": plan_key, 
         "type": order_type, 
         "target_uuid": target_uuid,
-        "menu_msg_id": update.callback_query.message.message_id
+        "menu_msg_id": msg_id
     }
     
     type_str = "续费" if order_type == 'renew' else "新购"
-    # 如果是自动跳转的续费，返回键应该回详情页；否则回主页
     back_data = f"view_sub_{short_id}" if order_type == 'renew' else "client_buy_new"
     
     keyboard = [[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")], [InlineKeyboardButton("🔙 返回", callback_data=back_data)]]
@@ -454,7 +454,30 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer("✅ 套餐已删除", show_alert=True)
         await show_plans_menu(update, context)
     elif data == "admin_users_list":
-        await show_users_list(update, context)
+        # 🟢 修复图2：去重显示
+        users = db_query("SELECT DISTINCT tg_id, MAX(created_at) as created_at FROM subscriptions GROUP BY tg_id ORDER BY created_at DESC LIMIT 20")
+        keyboard = []
+        for u in users:
+            u_dict = dict(u)
+            ts = u_dict['created_at']
+            date_str = datetime.datetime.fromtimestamp(int(ts)).strftime('%m-%d')
+            btn_text = f"🆔 {u_dict['tg_id']} | {date_str}"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"list_user_subs_{u_dict['tg_id']}")])
+        keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
+        await send_or_edit_menu(update, context, "👥 **用户管理 (最近20名)**\n点击ID查看其名下订阅：", InlineKeyboardMarkup(keyboard))
+        
+    elif data.startswith("list_user_subs_"):
+        # 🟢 新增：列出该用户下的所有订阅
+        target_uid = int(data.split("_")[3])
+        subs = db_query("SELECT * FROM subscriptions WHERE tg_id = ?", (target_uid,))
+        keyboard = []
+        for s in subs:
+            s_dict = dict(s)
+            short_uuid = s_dict['uuid'][:8]
+            keyboard.append([InlineKeyboardButton(f"UUID: {short_uuid}...", callback_data=f"manage_user_{s_dict['uuid']}")])
+        keyboard.append([InlineKeyboardButton("🔙 返回列表", callback_data="admin_users_list")])
+        await send_or_edit_menu(update, context, f"👤 用户 `{target_uid}` 的订阅列表：", InlineKeyboardMarkup(keyboard))
+
     elif data.startswith("manage_user_"):
         target_uuid = data.replace("manage_user_", "")
         sub = db_query("SELECT * FROM subscriptions WHERE uuid = ?", (target_uuid,), one=True)
@@ -464,7 +487,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         panel_info = await get_panel_user(target_uuid)
         status = "🟢 面板正常" if panel_info else "🔴 面板已删"
         msg = (f"👤 **用户详情**\nTG ID: `{dict(sub)['tg_id']}`\n状态: {status}\nUUID: `{target_uuid}`")
-        keyboard = [[InlineKeyboardButton("🔄 重置流量", callback_data=f"reset_traffic_{target_uuid}")], [InlineKeyboardButton("🗑 确认删除用户", callback_data=f"confirm_del_user_{target_uuid}")], [InlineKeyboardButton("🔙 返回列表", callback_data="admin_users_list")]]
+        keyboard = [[InlineKeyboardButton("🔄 重置流量", callback_data=f"reset_traffic_{target_uuid}")], [InlineKeyboardButton("🗑 确认删除用户", callback_data=f"confirm_del_user_{target_uuid}")], [InlineKeyboardButton("🔙 返回列表", callback_data=f"list_user_subs_{dict(sub)['tg_id']}")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
     elif data.startswith("reset_traffic_"):
         target_uuid = data.replace("reset_traffic_", "")
@@ -522,16 +545,17 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await show_plans_menu(update, context)
 
 async def show_users_list(update, context):
-    users = db_query("SELECT * FROM subscriptions ORDER BY created_at DESC LIMIT 20")
+    # 🟢 修复图2：去重显示
+    users = db_query("SELECT DISTINCT tg_id, MAX(created_at) as created_at FROM subscriptions GROUP BY tg_id ORDER BY created_at DESC LIMIT 20")
     keyboard = []
     for u in users:
         u_dict = dict(u)
         ts = u_dict['created_at']
         date_str = datetime.datetime.fromtimestamp(int(ts)).strftime('%m-%d')
         btn_text = f"🆔 {u_dict['tg_id']} | {date_str}"
-        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"manage_user_{u_dict['uuid']}")])
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"list_user_subs_{u_dict['tg_id']}")])
     keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
-    await send_or_edit_menu(update, context, "👥 **用户管理 (最近20条)**\n点击用户进行管理：", InlineKeyboardMarkup(keyboard))
+    await send_or_edit_menu(update, context, "👥 **用户管理 (最近20名)**\n点击ID查看其名下订阅：", InlineKeyboardMarkup(keyboard))
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -715,7 +739,6 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if r and r.status_code in [200, 201]:
                     resp_data = r.json().get('response', r.json())
                     user_uuid = resp_data.get('uuid')
-                    # 🟢 修复核心：保存 plan_key 到数据库
                     db_execute("INSERT INTO subscriptions (tg_id, uuid, created_at, plan_key) VALUES (?, ?, ?, ?)", 
                                (uid, user_uuid, int(time.time()), plan_key))
                     await query.edit_message_text(f"✅ 开通成功\n用户: {uid}", reply_markup=admin_return_btn)
@@ -805,6 +828,7 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^plan_detail_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^cancel_op$"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^manage_user_")) 
+    app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^list_user_subs_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^confirm_del_user_")) 
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^reset_traffic_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^set_strategy_"))
@@ -834,5 +858,5 @@ if __name__ == '__main__':
                 loop.create_task(reschedule_anomaly_job(app, val_int['value']))
     except: pass
 
-    print(f"🚀 RemnaShop-Pro V2.2 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V2.3 已启动 | 监听中...")
     app.run_polling()
