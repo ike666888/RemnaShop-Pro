@@ -333,7 +333,6 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if original_plan_key:
             plan = db_query("SELECT * FROM plans WHERE key = ?", (original_plan_key,), one=True)
             if plan:
-                # 🟢 修复图1：记录正确的菜单ID以便后续删除
                 await handle_order_confirmation(update, context, original_plan_key, 'renew', short_id)
                 return
 
@@ -375,7 +374,6 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
     strategy = plan_dict.get('reset_strategy', 'NO_RESET')
     strategy_label = get_strategy_label(strategy)
     
-    # 🟢 修复：尝试获取消息对象，无论是通过 callback 还是普通调用
     msg_id = None
     if update.callback_query and update.callback_query.message:
         msg_id = update.callback_query.message.message_id
@@ -454,7 +452,6 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer("✅ 套餐已删除", show_alert=True)
         await show_plans_menu(update, context)
     elif data == "admin_users_list":
-        # 🟢 修复图2：去重显示
         users = db_query("SELECT DISTINCT tg_id, MAX(created_at) as created_at FROM subscriptions GROUP BY tg_id ORDER BY created_at DESC LIMIT 20")
         keyboard = []
         for u in users:
@@ -467,7 +464,6 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_or_edit_menu(update, context, "👥 **用户管理 (最近20名)**\n点击ID查看其名下订阅：", InlineKeyboardMarkup(keyboard))
         
     elif data.startswith("list_user_subs_"):
-        # 🟢 新增：列出该用户下的所有订阅
         target_uid = int(data.split("_")[3])
         subs = db_query("SELECT * FROM subscriptions WHERE tg_id = ?", (target_uid,))
         keyboard = []
@@ -545,7 +541,6 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await show_plans_menu(update, context)
 
 async def show_users_list(update, context):
-    # 🟢 修复图2：去重显示
     users = db_query("SELECT DISTINCT tg_id, MAX(created_at) as created_at FROM subscriptions GROUP BY tg_id ORDER BY created_at DESC LIMIT 20")
     keyboard = []
     for u in users:
@@ -686,8 +681,12 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         plan_dict = dict(plan)
         add_traffic = plan_dict['gb'] * 1024 * 1024 * 1024
         add_days = plan_dict['days']
+        
+        # 获取策略
         try: reset_strategy = plan_dict.get('reset_strategy', 'NO_RESET')
         except: reset_strategy = 'NO_RESET'
+        strategy_label = get_strategy_label(reset_strategy) # 获取显示标签
+        
         try:
             if order_type == 'renew':
                 if not target_uuid:
@@ -718,7 +717,8 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     sub_url = user_info.get('subscriptionUrl', '')
                     display_expire = format_time(expire_iso)
                     display_traffic = round(new_limit/1024**3, 2)
-                    msg = (f"🎉 **续费成功！**\n\n⏳ 新到期时间：`{display_expire}`\n📡 当前总流量：`{display_traffic} GB`\n\n🔗 订阅链接：\n`{sub_url}`")
+                    # 🟢 修复：追加策略标记
+                    msg = (f"🎉 **续费成功！**\n\n⏳ 新到期时间：`{display_expire}`\n📡 当前总流量：`{display_traffic} GB ({strategy_label})`\n\n🔗 订阅链接：\n`{sub_url}`")
                     await clean_user_waiting_msg(uid)
                     if sub_url and sub_url.startswith('http'):
                         qr = generate_qr(sub_url)
@@ -744,7 +744,8 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.edit_message_text(f"✅ 开通成功\n用户: {uid}", reply_markup=admin_return_btn)
                     sub_url = resp_data.get('subscriptionUrl', '')
                     display_expire = format_time(expire_iso)
-                    msg = (f"🎉 **订阅开通成功！**\n\n📦 套餐：{plan_dict['name']}\n⏳ 到期时间：`{display_expire}`\n📡 包含流量：`{plan_dict['gb']} GB`\n\n🔗 订阅链接：\n`{sub_url}`")
+                    # 🟢 修复：追加策略标记
+                    msg = (f"🎉 **订阅开通成功！**\n\n📦 套餐：{plan_dict['name']}\n⏳ 到期时间：`{display_expire}`\n📡 包含流量：`{plan_dict['gb']} GB ({strategy_label})`\n\n🔗 订阅链接：\n`{sub_url}`")
                     await clean_user_waiting_msg(uid)
                     if sub_url and sub_url.startswith('http'):
                         qr = generate_qr(sub_url)
@@ -858,5 +859,5 @@ if __name__ == '__main__':
                 loop.create_task(reschedule_anomaly_job(app, val_int['value']))
     except: pass
 
-    print(f"🚀 RemnaShop-Pro V2.3 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V2.4 已启动 | 监听中...")
     app.run_polling()
