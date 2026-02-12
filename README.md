@@ -90,6 +90,8 @@ bash <(curl -sL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/i
 
 2. 脚本会自动安装 `python3`、`pip` 及所需依赖库。
 
+> 更新说明：新版会同步 `bot.py` 以及 `services/`、`storage/`、`utils/` 模块文件，避免只更新单文件导致启动失败。
+
 3. **首次安装**会依次询问以下配置信息，请按提示输入：
 
 * 管理员 TG ID
