@@ -1,25 +1,71 @@
+import asyncio
 import logging
+from typing import Optional
+
 import httpx
 
 logger = logging.getLogger(__name__)
 
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_CLIENTS: dict[bool, httpx.AsyncClient] = {}
+
+
+def _get_client(verify_tls: bool) -> httpx.AsyncClient:
+    client = _CLIENTS.get(verify_tls)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(timeout=20.0, verify=verify_tls)
+        _CLIENTS[verify_tls] = client
+    return client
+
+
+async def close_all_clients() -> None:
+    for client in list(_CLIENTS.values()):
+        if not client.is_closed:
+            await client.aclose()
+    _CLIENTS.clear()
+
 
 async def safe_api_request(method, endpoint, panel_url, headers, verify_tls=True, json_data=None):
     url = f"{panel_url}{endpoint}"
-    try:
-        async with httpx.AsyncClient(timeout=20.0, verify=verify_tls) as client:
+    client = _get_client(verify_tls)
+    max_attempts = 3
+    backoff_seconds = 0.6
+
+    for attempt in range(1, max_attempts + 1):
+        try:
             if method == 'GET':
-                return await client.get(url, headers=headers)
-            if method == 'POST':
-                return await client.post(url, json=json_data, headers=headers)
-            if method == 'PATCH':
-                return await client.patch(url, json=json_data, headers=headers)
-            if method == 'DELETE':
-                return await client.delete(url, headers=headers)
-            raise ValueError(f"Unsupported method: {method}")
-    except Exception as exc:
-        logger.error("API Error [%s %s]: %s", method, endpoint, exc)
-        return None
+                resp = await client.get(url, headers=headers)
+            elif method == 'POST':
+                resp = await client.post(url, json=json_data, headers=headers)
+            elif method == 'PATCH':
+                resp = await client.patch(url, json=json_data, headers=headers)
+            elif method == 'DELETE':
+                resp = await client.delete(url, headers=headers)
+            else:
+                raise ValueError(f"Unsupported method: {method}")
+
+            if resp.status_code in _RETRYABLE_STATUS_CODES and attempt < max_attempts:
+                await asyncio.sleep(backoff_seconds * attempt)
+                continue
+
+            if resp.status_code >= 400:
+                logger.warning(
+                    "Panel API returned %s [%s %s]: %s",
+                    resp.status_code,
+                    method,
+                    endpoint,
+                    resp.text[:300],
+                )
+            return resp
+        except httpx.HTTPError as exc:
+            if attempt < max_attempts:
+                await asyncio.sleep(backoff_seconds * attempt)
+                continue
+            logger.error("API HTTP Error [%s %s]: %s", method, endpoint, exc)
+            return None
+        except Exception as exc:
+            logger.error("API Error [%s %s]: %s", method, endpoint, exc)
+            return None
 
 
 async def get_panel_user(uuid, panel_url, headers, verify_tls=True):

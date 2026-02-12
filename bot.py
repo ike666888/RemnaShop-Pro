@@ -7,7 +7,7 @@ import asyncio
 import qrcode
 from io import BytesIO
 from collections import defaultdict
-from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_nodes_status as api_get_nodes_status
+from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_nodes_status as api_get_nodes_status, close_all_clients
 from services.orders import (
     create_order,
     get_order,
@@ -866,13 +866,20 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
                 ex_dt = datetime.datetime.strptime(ex_str, "%Y-%m-%dT%H:%M:%S")
                 days_left = (ex_dt - now).days
                 if 0 <= days_left <= notify_days:
-                    sid = get_short_id(u_dict['uuid'])
-                    kb = [[InlineKeyboardButton("💳 立即续费", callback_data=f"selrenew_{sid}")]]
-                    msg = f"⚠️ **续费提醒**\n\n您的订阅 (UUID: `{u_dict['uuid'][:8]}...`) \n将在 **{days_left}** 天后到期。\n请及时续费以免服务中断。"
-                    try:
-                        await context.bot.send_message(u_dict['tg_id'], msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
-                    except Exception as exc:
-                        logger.warning("Failed to send expiry notice to %s: %s", u_dict['tg_id'], exc)
+                    last_notify_expire = u_dict.get('last_notify_expire_at')
+                    last_notify_days_left = u_dict.get('last_notify_days_left')
+                    if str(last_notify_expire or '') != ex_str or int(last_notify_days_left or -999) != days_left:
+                        sid = get_short_id(u_dict['uuid'])
+                        kb = [[InlineKeyboardButton("💳 立即续费", callback_data=f"selrenew_{sid}")]]
+                        msg = f"⚠️ **续费提醒**\n\n您的订阅 (UUID: `{u_dict['uuid'][:8]}...`) \n将在 **{days_left}** 天后到期。\n请及时续费以免服务中断。"
+                        try:
+                            await context.bot.send_message(u_dict['tg_id'], msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+                            db_execute(
+                                "UPDATE subscriptions SET last_notify_expire_at = ?, last_notify_days_left = ? WHERE uuid = ?",
+                                (ex_str, days_left, u_dict['uuid']),
+                            )
+                        except Exception as exc:
+                            logger.warning("Failed to send expiry notice to %s: %s", u_dict['tg_id'], exc)
                 if days_left == -1 and info.get('status') == 'active':
                     await safe_api_request('POST', f"/users/{u_dict['uuid']}/actions/disable")
                 if days_left < -cleanup_days:
@@ -957,4 +964,11 @@ if __name__ == '__main__':
         logger.warning("Failed to reschedule anomaly job at startup: %s", exc)
 
     print(f"🚀 RemnaShop-Pro V2.4 已启动 | 监听中...")
-    app.run_polling()
+    try:
+        app.run_polling()
+    finally:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(close_all_clients())
+        finally:
+            loop.close()

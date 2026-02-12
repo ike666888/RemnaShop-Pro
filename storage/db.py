@@ -14,6 +14,15 @@ def init_db(db_file: str) -> None:
         pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+
+    try:
+        c.execute("ALTER TABLE subscriptions ADD COLUMN last_notify_expire_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE subscriptions ADD COLUMN last_notify_days_left INTEGER")
+    except sqlite3.OperationalError:
+        pass
     try:
         c.execute("ALTER TABLE plans ADD COLUMN reset_strategy TEXT DEFAULT 'NO_RESET'")
     except sqlite3.OperationalError:

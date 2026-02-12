@@ -11,6 +11,15 @@ STATUS_FAILED = "failed"
 logger = logging.getLogger(__name__)
 
 
+def _mask_payment_text(payment_text: str) -> str:
+    if not payment_text:
+        return ""
+    text = str(payment_text).strip()
+    if len(text) <= 8:
+        return "*" * len(text)
+    return f"{text[:4]}{'*' * (len(text) - 8)}{text[-4:]}"
+
+
 def create_order(db_query, db_execute, tg_id, plan_key, order_type, target_uuid, menu_message_id=None):
     existing = db_query(
         "SELECT * FROM orders WHERE tg_id=? AND status=? ORDER BY created_at DESC LIMIT 1",
@@ -53,9 +62,10 @@ def update_order_status(db_execute, order_id, from_statuses, to_status, error_me
 
 def attach_payment_text(db_execute, order_id, payment_text, waiting_message_id=None):
     now = int(time.time())
+    masked_payment_text = _mask_payment_text(payment_text)
     db_execute(
         "UPDATE orders SET payment_text=?, waiting_message_id=?, updated_at=? WHERE order_id=?",
-        (payment_text, waiting_message_id, now, order_id),
+        (masked_payment_text, waiting_message_id, now, order_id),
     )
 
 
