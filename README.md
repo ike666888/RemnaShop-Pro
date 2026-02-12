@@ -90,6 +90,8 @@ bash <(curl -sL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/i
 
 2. 脚本会自动安装 `python3`、`pip` 及所需依赖库。
 
+> 更新说明：新版会同步 `bot.py` 以及 `services/`、`storage/`、`utils/` 模块文件，避免只更新单文件导致启动失败。
+
 3. **首次安装**会依次询问以下配置信息，请按提示输入：
 
 * 管理员 TG ID
@@ -103,6 +105,7 @@ bash <(curl -sL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/i
 * 订阅域名
 
 * 默认用户组 UUID
+* （可选）`panel_verify_tls`：是否校验面板 HTTPS 证书（默认开启，建议保持 `true`）
 
 4. 安装完成后，机器人会自动启动并设置为开机自启。
 
@@ -145,6 +148,19 @@ bash <(curl -sL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/i
 ---
 
 
+
+
+### 🧾 订单状态机（新增）
+
+当前版本已引入持久化订单状态机（SQLite `orders` 表），核心状态包括：
+
+- `pending`（待审核）
+- `approved`（审核通过，发货处理中）
+- `rejected`（审核拒绝）
+- `delivered`（已发货）
+- `failed`（发货失败）
+
+管理员重复点击“通过”不会重复发货（幂等保护）。
 
 ## ⚙️ 目录结构
 
