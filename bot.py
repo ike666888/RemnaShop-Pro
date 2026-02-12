@@ -19,6 +19,14 @@ DB_FILE = os.path.join(BASE_DIR, 'starlight.db')
 
 ANOMALY_IP_THRESHOLD = 50
 
+
+def parse_bool(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         print(f"配置文件缺失: {CONFIG_FILE}")
@@ -34,6 +42,7 @@ PANEL_URL = config['panel_url'].rstrip('/') + '/api'
 PANEL_TOKEN = config['panel_token']
 SUB_DOMAIN = config['sub_domain'].rstrip('/')
 TARGET_GROUP_UUID = config['group_uuid']
+PANEL_VERIFY_TLS = parse_bool(config.get('panel_verify_tls', True), default=True)
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
@@ -140,7 +149,7 @@ def get_headers():
 async def safe_api_request(method, endpoint, json_data=None):
     url = f"{PANEL_URL}{endpoint}"
     try:
-        async with httpx.AsyncClient(timeout=20.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=20.0, verify=PANEL_VERIFY_TLS) as client:
             if method == 'GET':
                 resp = await client.get(url, headers=get_headers())
             elif method == 'POST':

@@ -103,6 +103,7 @@ bash <(curl -sL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/i
 * 订阅域名
 
 * 默认用户组 UUID
+* （可选）`panel_verify_tls`：是否校验面板 HTTPS 证书（默认开启，建议保持 `true`）
 
 4. 安装完成后，机器人会自动启动并设置为开机自启。
 
