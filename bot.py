@@ -26,7 +26,7 @@ from services.orders import (
 from storage.db import init_db as storage_init_db, db_query as storage_db_query, db_execute as storage_db_execute
 from utils.formatting import escape_markdown_v2
 from handlers.bulk_actions import parse_uuids, parse_expire_days_and_uuids, parse_traffic_and_uuids, run_bulk_action
-from handlers.admin import format_order_detail
+from handlers.admin import format_order_detail, format_order_row, order_status_label
 from handlers.client import build_nodes_status_message
 from jobs.anomaly import build_anomaly_incidents
 from jobs.expiry import should_send_expire_notice
@@ -428,7 +428,7 @@ async def reschedule_anomaly_job(application, interval_hours):
 async def show_orders_menu(update, context, status_filter=None):
     if status_filter:
         rows = db_query("SELECT * FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT 20", (status_filter,))
-        title = f"🧾 **订单审计 - {status_filter}**"
+        title = f"🧾 **订单审计 - {order_status_label(status_filter)}**"
     else:
         rows = db_query("SELECT * FROM orders ORDER BY created_at DESC LIMIT 20")
         title = "🧾 **订单审计 - 最近20条**"
@@ -436,21 +436,20 @@ async def show_orders_menu(update, context, status_filter=None):
     keyboard = []
     for row in rows:
         item = dict(row)
-        ts = datetime.datetime.fromtimestamp(int(item['created_at'])).strftime('%m-%d %H:%M')
         keyboard.append([
             InlineKeyboardButton(
-                f"{item['status']} | {item['order_id']} | {item['tg_id']} | {ts}",
+                format_order_row(item),
                 callback_data=f"admin_order_{item['order_id']}",
             )
         ])
 
     keyboard.append([
-        InlineKeyboardButton("pending", callback_data="admin_orders_status_pending"),
-        InlineKeyboardButton("delivered", callback_data="admin_orders_status_delivered"),
+        InlineKeyboardButton("🟡 待审核", callback_data="admin_orders_status_pending"),
+        InlineKeyboardButton("✅ 已发货", callback_data="admin_orders_status_delivered"),
     ])
     keyboard.append([
-        InlineKeyboardButton("failed", callback_data="admin_orders_status_failed"),
-        InlineKeyboardButton("all", callback_data="admin_orders_menu"),
+        InlineKeyboardButton("❌ 失败", callback_data="admin_orders_status_failed"),
+        InlineKeyboardButton("📋 全部", callback_data="admin_orders_menu"),
     ])
     keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
     await send_or_edit_menu(update, context, title, InlineKeyboardMarkup(keyboard))
