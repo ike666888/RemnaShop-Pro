@@ -65,11 +65,21 @@ def init_db(db_file: str) -> None:
         created_at INTEGER NOT NULL
     )''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS order_audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        actor_id INTEGER,
+        detail TEXT,
+        created_at INTEGER NOT NULL
+    )''')
+
     c.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_tg_id ON subscriptions (tg_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_uuid ON subscriptions (uuid)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_orders_tg_id_status ON orders (tg_id, status)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders (order_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders (status, created_at DESC)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_order_audit_order_id ON order_audit_logs (order_id, created_at DESC)")
 
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_days', '3')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cleanup_days', '7')")

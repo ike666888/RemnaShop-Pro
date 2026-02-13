@@ -51,12 +51,17 @@ install_bot() {
     fi
 
     echo -e "${YELLOW}正在拉取最新代码...${NC}"
-    mkdir -p "$WORK_DIR/services" "$WORK_DIR/storage" "$WORK_DIR/utils"
+    mkdir -p "$WORK_DIR/services" "$WORK_DIR/storage" "$WORK_DIR/utils" "$WORK_DIR/handlers" "$WORK_DIR/jobs"
     curl -fsSL -o "$WORK_DIR/bot.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/bot.py
     curl -fsSL -o "$WORK_DIR/services/orders.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/services/orders.py
     curl -fsSL -o "$WORK_DIR/services/panel_api.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/services/panel_api.py
     curl -fsSL -o "$WORK_DIR/storage/db.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/storage/db.py
     curl -fsSL -o "$WORK_DIR/utils/formatting.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/utils/formatting.py
+    curl -fsSL -o "$WORK_DIR/handlers/bulk_actions.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/handlers/bulk_actions.py
+    curl -fsSL -o "$WORK_DIR/handlers/admin.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/handlers/admin.py
+    curl -fsSL -o "$WORK_DIR/handlers/client.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/handlers/client.py
+    curl -fsSL -o "$WORK_DIR/jobs/anomaly.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/jobs/anomaly.py
+    curl -fsSL -o "$WORK_DIR/jobs/expiry.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/jobs/expiry.py
 
     chmod +x "$WORK_DIR/bot.py"
     echo -e "${GREEN}代码文件同步完成。${NC}"

@@ -20,6 +20,19 @@ def _mask_payment_text(payment_text: str) -> str:
     return f"{text[:4]}{'*' * (len(text) - 8)}{text[-4:]}"
 
 
+def classify_order_failure(error_text: str) -> str:
+    text = (error_text or "").lower()
+    if any(k in text for k in ["timeout", "connect", "http", "network", "api"]):
+        return "network"
+    if any(k in text for k in ["uuid", "not found", "invalid", "plan", "status"]):
+        return "business_validation"
+    if any(k in text for k in ["sqlite", "database", "db", "constraint"]):
+        return "database"
+    if any(k in text for k in ["telegram", "forbidden", "chat not found", "message"]):
+        return "telegram"
+    return "unknown"
+
+
 def create_order(db_query, db_execute, tg_id, plan_key, order_type, target_uuid, menu_message_id=None):
     existing = db_query(
         "SELECT * FROM orders WHERE tg_id=? AND status=? ORDER BY created_at DESC LIMIT 1",
@@ -72,6 +85,14 @@ def attach_payment_text(db_execute, order_id, payment_text, waiting_message_id=N
 def attach_admin_message(db_execute, order_id, admin_message_id):
     now = int(time.time())
     db_execute("UPDATE orders SET admin_message_id=?, updated_at=? WHERE order_id=?", (admin_message_id, now, order_id))
+
+
+def append_order_audit_log(db_execute, order_id, action, actor_id, detail=""):
+    now = int(time.time())
+    db_execute(
+        "INSERT INTO order_audit_logs (order_id, action, actor_id, detail, created_at) VALUES (?, ?, ?, ?, ?)",
+        (order_id, action, int(actor_id or 0), str(detail)[:500], now),
+    )
 
 
 def get_pending_order_for_user(db_query, tg_id):

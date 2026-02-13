@@ -14,6 +14,8 @@ from services.orders import (
     update_order_status,
     attach_payment_text,
     attach_admin_message,
+    append_order_audit_log,
+    classify_order_failure,
     get_pending_order_for_user,
     STATUS_PENDING,
     STATUS_APPROVED,
@@ -23,6 +25,11 @@ from services.orders import (
 )
 from storage.db import init_db as storage_init_db, db_query as storage_db_query, db_execute as storage_db_execute
 from utils.formatting import escape_markdown_v2
+from handlers.bulk_actions import parse_uuids, parse_expire_days_and_uuids, parse_traffic_and_uuids, run_bulk_action
+from handlers.admin import format_order_detail
+from handlers.client import build_nodes_status_message
+from jobs.anomaly import build_anomaly_incidents
+from jobs.expiry import should_send_expire_notice
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
@@ -185,6 +192,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("👥 用户列表", callback_data="admin_users_list")],
             [InlineKeyboardButton("🔔 提醒设置", callback_data="admin_notify"), InlineKeyboardButton("🗑 清理设置", callback_data="admin_cleanup")],
             [InlineKeyboardButton("🛡️ 异常设置", callback_data="admin_anomaly_menu")],
+            [InlineKeyboardButton("📚 批量操作", callback_data="admin_bulk_menu")],
             [InlineKeyboardButton("🧾 订单审计", callback_data="admin_orders_menu")]
         ]
     else:
@@ -376,6 +384,8 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
         msg_id = update.callback_query.message.message_id
 
     order, created = create_order(db_query, db_execute, user_id, plan_key, order_type, target_uuid, menu_message_id=msg_id)
+    if created:
+        append_order_audit_log(db_execute, order['order_id'], 'create', user_id, f'type={order_type};plan={plan_key}')
 
     type_str = "续费" if order_type == 'renew' else "新购"
     back_data = f"view_sub_{short_id}" if order_type == 'renew' else "client_buy_new"
@@ -475,6 +485,40 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.clear()
         await start(update, context)
         return
+    if data == "admin_bulk_menu":
+        msg = """📚 **批量用户操作**
+
+请选择操作类型：
+- 批量重置流量
+- 批量禁用
+- 批量删除
+- 批量改到期日
+- 批量改流量包"""
+        kb = [
+            [InlineKeyboardButton("🔄 批量重置流量", callback_data="bulk_reset")],
+            [InlineKeyboardButton("⛔ 批量禁用", callback_data="bulk_disable")],
+            [InlineKeyboardButton("🗑 批量删除", callback_data="bulk_delete")],
+            [InlineKeyboardButton("📅 批量改到期日", callback_data="bulk_expire")],
+            [InlineKeyboardButton("📡 批量改流量包", callback_data="bulk_traffic")],
+            [InlineKeyboardButton("🔙 返回", callback_data="back_home")],
+        ]
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
+        return
+    if data in {"bulk_reset", "bulk_disable", "bulk_delete"}:
+        context.user_data['bulk_action'] = data.replace('bulk_', '')
+        tip = "每行一个UUID，或使用空格/逗号分隔。"
+        await send_or_edit_menu(update, context, f"✍️ 请输入用户UUID列表\n{tip}", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_bulk_menu")]]))
+        return
+    if data == "bulk_expire":
+        context.user_data['bulk_action'] = 'expire'
+        tip = "第一行输入天数（例如 30），从第二行开始输入UUID列表。"
+        await send_or_edit_menu(update, context, f"✍️ 批量改到期日\n{tip}", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_bulk_menu")]]))
+        return
+    if data == "bulk_traffic":
+        context.user_data['bulk_action'] = 'traffic'
+        tip = "第一行输入流量GB（例如 200），从第二行开始输入UUID列表。"
+        await send_or_edit_menu(update, context, f"✍️ 批量改流量包\n{tip}", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_bulk_menu")]]))
+        return
     if data == "admin_orders_menu":
         await show_orders_menu(update, context)
         return
@@ -489,16 +533,8 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await send_or_edit_menu(update, context, "⚠️ 订单不存在", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_orders_menu")]]))
             return
         item = dict(order)
-        created = datetime.datetime.fromtimestamp(int(item['created_at'])).strftime('%Y-%m-%d %H:%M')
-        txt = (
-            f"🧾 **订单详情**\n\n"
-            f"ID: `{item['order_id']}`\n"
-            f"用户: `{item['tg_id']}`\n"
-            f"状态: `{item['status']}`\n"
-            f"类型: `{item['order_type']}`\n"
-            f"套餐: `{item['plan_key']}`\n"
-            f"创建: `{created}`"
-        )
+        logs = db_query("SELECT * FROM order_audit_logs WHERE order_id=? ORDER BY created_at DESC LIMIT 5", (item['order_id'],))
+        txt = format_order_detail(item, [dict(x) for x in logs])
         kb = [[InlineKeyboardButton("🔙 返回", callback_data="admin_orders_menu")]]
         if item.get('status') == STATUS_FAILED:
             kb.insert(0, [InlineKeyboardButton("♻️ 重试发货", callback_data=f"rt_{item['order_id']}")])
@@ -750,6 +786,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['add_anomaly_whitelist'] = False
         await update.message.reply_text("✅ 白名单已添加。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="anomaly_whitelist_menu")]]))
         return
+    if user_id == ADMIN_ID and context.user_data.get('bulk_action') and text:
+        action = context.user_data.get('bulk_action')
+        try:
+            if action in {'reset', 'disable', 'delete'}:
+                uuids = parse_uuids(text)
+                extra = None
+            elif action == 'expire':
+                expire_at, uuids = parse_expire_days_and_uuids(text)
+                extra = {'expireAt': expire_at}
+            elif action == 'traffic':
+                traffic_bytes, uuids = parse_traffic_and_uuids(text)
+                extra = {'trafficLimitBytes': traffic_bytes}
+            else:
+                await update.message.reply_text("❌ 未知操作类型", reply_markup=cancel_kb)
+                return
+
+            if not uuids:
+                await update.message.reply_text("❌ 未解析到有效UUID，请检查输入格式", reply_markup=cancel_kb)
+                return
+
+            ok, fail = await run_bulk_action(safe_api_request, action, uuids, extra_fields=extra)
+            context.user_data.pop('bulk_action', None)
+            await update.message.reply_text(
+                f"✅ 批量操作完成\n成功: {ok}\n失败: {fail}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_bulk_menu")]]),
+            )
+        except Exception as exc:
+            await update.message.reply_text(f"❌ 批量操作失败: {exc}", reply_markup=cancel_kb)
+        return
     if user_id == ADMIN_ID and 'add_plan_step' in context.user_data and text:
         step = context.user_data['add_plan_step']
         if step == 'name':
@@ -837,6 +902,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⚠️ 订单不存在或已过期", reply_markup=admin_return_btn)
             return
         changed = update_order_status(db_execute, order_id, [STATUS_PENDING, STATUS_APPROVED], STATUS_REJECTED, error_message='rejected_by_admin')
+        append_order_audit_log(db_execute, order_id, 'reject', query.from_user.id, 'rejected_by_admin')
         if not changed and order.get('status') == STATUS_REJECTED:
             await query.edit_message_text("ℹ️ 该订单已拒绝，无需重复操作", reply_markup=admin_return_btn)
             return
@@ -858,6 +924,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⚠️ 仅允许重试失败订单", reply_markup=admin_return_btn)
             return
         switched = update_order_status(db_execute, order_id, [STATUS_FAILED], STATUS_APPROVED, error_message='retry_by_admin')
+        append_order_audit_log(db_execute, order_id, 'retry', query.from_user.id, 'retry_by_admin')
         if not switched:
             await query.edit_message_text("⚠️ 订单状态更新失败，请重试", reply_markup=admin_return_btn)
             return
@@ -895,7 +962,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
     if not plan:
-        update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED, error_message='plan_deleted')
+        update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED, error_message='reason:business_validation|plan_deleted')
         await query.edit_message_text("❌ 套餐已删除", reply_markup=admin_return_btn)
         return
 
@@ -909,7 +976,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if order_type == 'renew':
             if not target_uuid:
-                update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED, error_message='missing_target_uuid')
+                update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED, error_message='reason:business_validation|missing_target_uuid')
                 await query.edit_message_text("⚠️ 订单数据已过期", reply_markup=admin_return_btn)
                 return
             user_info = await get_panel_user(target_uuid)
@@ -940,6 +1007,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             r = await safe_api_request('PATCH', "/users", json_data=update_payload)
             if r and r.status_code in [200, 204]:
                 update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_DELIVERED, delivered_uuid=target_uuid)
+                append_order_audit_log(db_execute, order_id, 'deliver_success', query.from_user.id, 'renew')
                 await query.edit_message_text(f"✅ 续费成功\n用户: {uid}", reply_markup=admin_return_btn)
                 sub_url = user_info.get('subscriptionUrl', '')
                 display_expire = format_time(expire_iso)
@@ -957,7 +1025,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await context.bot.send_message(uid, msg, parse_mode='MarkdownV2', reply_markup=client_return_btn)
             else:
-                update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED, error_message='panel_api_error_renew')
+                update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED, error_message='reason:network|panel_api_error_renew')
                 await query.edit_message_text("❌ API报错", reply_markup=admin_return_btn)
         else:
             new_expire = datetime.datetime.utcnow() + datetime.timedelta(days=add_days)
@@ -980,6 +1048,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (uid, user_uuid, int(time.time()), plan_key),
                 )
                 update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_DELIVERED, delivered_uuid=user_uuid)
+                append_order_audit_log(db_execute, order_id, 'deliver_success', query.from_user.id, 'new')
                 await query.edit_message_text(f"✅ 开通成功\n用户: {uid}", reply_markup=admin_return_btn)
                 sub_url = resp_data.get('subscriptionUrl', '')
                 display_expire = format_time(expire_iso)
@@ -997,11 +1066,14 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await context.bot.send_message(uid, msg, parse_mode='MarkdownV2', reply_markup=client_return_btn)
             else:
-                update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED, error_message='panel_api_error_new')
+                update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED, error_message='reason:network|panel_api_error_new')
                 await query.edit_message_text("❌ 失败", reply_markup=admin_return_btn)
     except Exception as exc:
         logger.exception("Order processing failed for %s", order_id)
-        update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED, error_message=str(exc)[:400])
+        reason = classify_order_failure(str(exc))
+        detail = f"reason:{reason}|{str(exc)[:320]}"
+        update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED, error_message=detail)
+        append_order_audit_log(db_execute, order_id, 'deliver_failed', query.from_user.id, detail)
         await query.edit_message_text(f"❌ 错误: {exc}", reply_markup=admin_return_btn)
 
 async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
@@ -1033,7 +1105,7 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
                     last_notify_days_left = u_dict.get('last_notify_days_left')
                     last_notify_at = int(u_dict.get('last_notify_at') or 0)
                     now_ts = int(time.time())
-                    can_send_by_daily_limit = (now_ts - last_notify_at) >= 20 * 3600
+                    can_send_by_daily_limit = should_send_expire_notice(last_notify_at, now_ts)
                     if (str(last_notify_expire or '') != ex_str or int(last_notify_days_left or -999) != days_left) and can_send_by_daily_limit:
                         sid = get_short_id(u_dict['uuid'])
                         kb = [[InlineKeyboardButton("💳 立即续费", callback_data=f"selrenew_{sid}")]]
@@ -1095,28 +1167,32 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
                         continue
             return 0
 
-        user_ip_map = defaultdict(set)
-        max_seen_ts = last_scan_ts
-        for log in logs:
-            row_ts = _extract_log_ts(log)
-            if row_ts and row_ts <= last_scan_ts:
-                continue
-            if row_ts > max_seen_ts:
-                max_seen_ts = row_ts
-            uid = log.get('userUuid')
-            ip = log.get('ip')
-            if uid in whitelist:
-                continue
-            if uid and ip:
-                user_ip_map[uid].add(ip)
+        prepared = []
+        for row in logs:
+            rec = dict(row)
+            ts = _extract_log_ts(rec)
+            rec['_ts'] = ts
+            rec['_fmt_time'] = datetime.datetime.utcfromtimestamp(ts).strftime('%m-%d %H:%M') if ts else '-'
+            prepared.append(rec)
 
-        for uid, ips in user_ip_map.items():
-            if len(ips) > limit:
-                await safe_api_request('POST', f"/users/{uid}/actions/disable")
-                try:
-                    await context.bot.send_message(ADMIN_ID, f"🚨 **异常检测**\n\n用户 `{uid}` 使用了 {len(ips)} 个IP。\n已自动禁用。")
-                except Exception as exc:
-                    logger.warning("Failed to notify anomaly admin: %s", exc)
+        incidents, max_seen_ts = build_anomaly_incidents(prepared, last_scan_ts, whitelist, limit)
+
+        for item in incidents:
+            uid = item['uid']
+            await safe_api_request('POST', f"/users/{uid}/actions/disable")
+            try:
+                lines = [
+                    "🚨 **异常检测（可解释）**",
+                    f"用户: `{uid}`",
+                    f"风险评分: `{item['score']}`",
+                    f"IP数量: `{item['ip_count']}` | UA分散: `{item['ua_diversity']}` | 请求密度: `{item['density']}`",
+                    "证据（最近10条）:",
+                ]
+                for ev in item['evidence'][:10]:
+                    lines.append(f"- `{ev['ts']}` | `{ev['ip']}` | `{ev['ua']}`")
+                await context.bot.send_message(ADMIN_ID, '\n'.join(lines), parse_mode='Markdown')
+            except Exception as exc:
+                logger.warning("Failed to notify anomaly admin: %s", exc)
 
         if max_seen_ts > last_scan_ts:
             db_execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('anomaly_last_scan_ts', ?)", (str(max_seen_ts),))
@@ -1143,6 +1219,7 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^admin_orders_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^admin_order_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^anomaly_whitelist_"))
+    app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^bulk_"))
     app.add_handler(CallbackQueryHandler(add_plan_start, pattern="^add_plan_start$"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^client_"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^selrenew_"))
