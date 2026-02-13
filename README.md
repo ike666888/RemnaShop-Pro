@@ -1,39 +1,49 @@
 # 🚀 RemnaShop-Pro
 
-RemnaShop-Pro 是一个面向 **Remnawave Panel** 的 Telegram 销售与运维机器人，支持支付审核、自动发货、异常风控和批量运营。
+RemnaShop-Pro 是一个面向 **Remnawave Panel** 的 Telegram 售卖与运维机器人，覆盖“下单审核、自动发货、批量运营、异常风控、客服转发”的完整闭环。
 
 ---
 
-## ✨ 主要功能
+## ✨ 功能总览
 
 ### 👤 用户端
 - 套餐购买 / 续费下单
 - 订阅信息查看（流量、到期、订阅链接、二维码）
 - 节点状态查看
-- 客服消息转发
+- 联系客服（支持文字/图片/文件转发）
 
 ### 👮 管理端
-- 套餐管理（增删 + 流量策略）
-- 用户管理（单用户重置流量、删除、请求历史）
-- 订单审计（pending/approved/rejected/delivered/failed）
-- 失败订单重试发货
-- 异常检测（可解释告警：风险评分 + 证据）
-- 异常白名单管理
-- **批量用户操作（Bulk）**
+- 套餐管理（新增/删除 + 流量重置策略）
+- 用户管理（重置流量、删除用户、查看请求记录）
+- 订单审计（待审核 / 处理中 / 已拒绝 / 已发货 / 失败）
+- 失败订单一键重试发货
+- 异常检测（可解释告警：风险评分 + 命中证据）
+- 异常白名单管理（支持告警消息内快捷加入）
+- 批量用户操作（带预检查确认）
   - 批量重置流量
   - 批量禁用
   - 批量删除
-  - 批量修改到期日
+  - 批量修改到期时间
   - 批量修改流量包
 
-### 🧱 架构（已拆分）
-- `bot.py`：入口和主路由
-- `services/panel_api.py`：Panel API 请求、重试、连接复用
-- `services/orders.py`：订单状态机、失败原因分类、审计写入
+### 🎨 交互与美化
+- 管理员首页展示今日订单/待审核/失败统计
+- 订单审计列表中文状态图标化展示
+- 订单审计支持分页浏览（上一页 / 下一页）
+- 管理按钮与菜单命名全部中文化
+
+---
+
+## 🧱 项目结构
+- `bot.py`：主入口与核心路由
+- `services/panel_api.py`：面板接口请求（连接复用 + 重试）
+- `services/orders.py`：订单状态机与审计能力
 - `storage/db.py`：SQLite 初始化与访问
-- `handlers/bulk_actions.py`：批量操作解析与执行
-- `handlers/admin.py` / `handlers/client.py`：管理端、用户端可复用渲染逻辑
-- `jobs/anomaly.py` / `jobs/expiry.py`：异常检测与到期策略辅助逻辑
+- `handlers/admin.py`：管理端文案渲染与中文状态映射
+- `handlers/client.py`：用户端展示渲染
+- `handlers/bulk_actions.py`：批量操作解析、分批执行、预检查
+- `jobs/anomaly.py`：异常评分与证据生成
+- `jobs/expiry.py`：到期提醒节流工具
 - `utils/formatting.py`：MarkdownV2 转义
 
 ---
@@ -42,21 +52,21 @@ RemnaShop-Pro 是一个面向 **Remnawave Panel** 的 Telegram 销售与运维�
 - Debian / Ubuntu VPS
 - Python 3.9+
 - 可访问 Remnawave Panel API
-- Telegram Bot Token
+- Telegram 机器人令牌
 
 ---
 
 ## 🚀 一键安装 / 更新
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/install.sh)
 ```
 
-安装脚本会：
-1. 安装 Python / pip 依赖
+安装脚本会自动完成：
+1. 安装 Python 与依赖
 2. 同步 `bot.py` 与 `services/ storage/ handlers/ jobs/ utils/` 代码
 3. 首次生成 `config.json`
-4. 创建并启动 `systemd` 服务 `remnashop`
+4. 配置并启动 `remnashop` 系统服务
 
 ---
 
@@ -64,20 +74,27 @@ bash <(curl -sL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/i
 默认路径：`/opt/RemnaShop/config.json`
 
 关键字段：
-- `admin_id`
-- `bot_token`
-- `panel_url`
-- `panel_token`
-- `sub_domain`
-- `group_uuid`
-- `panel_verify_tls`（默认 true）
+- `admin_id`（管理员 Telegram ID）
+- `bot_token`（机器人令牌）
+- `panel_url`（面板地址）
+- `panel_token`（面板接口令牌）
+- `sub_domain`（订阅域名）
+- `group_uuid`（默认用户组 UUID）
+- `panel_verify_tls`（是否校验面板 HTTPS 证书，建议 `true`）
 
 ---
 
 ## 🔧 运维命令
 ```bash
+# 查看日志
 journalctl -u remnashop -f
+
+# 重启服务
 systemctl restart remnashop
+systemctl status remnashop
+```
+
+# 查看状态
 systemctl status remnashop
 ```
 

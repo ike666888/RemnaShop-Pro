@@ -186,7 +186,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning("failed to load admin settings, using defaults: %s", exc)
             notify_days = 3
             cleanup_days = 7
-        msg_text = (f"👮‍♂️ **管理员控制台**\n🔔 提醒设置：提前 {notify_days} 天\n🗑 清理设置：过期 {cleanup_days} 天")
+        try:
+            pending_cnt = db_query("SELECT COUNT(*) AS c FROM orders WHERE status='pending'", one=True)['c']
+            failed_cnt = db_query("SELECT COUNT(*) AS c FROM orders WHERE status='failed'", one=True)['c']
+            today_ts = int(datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+            today_cnt = db_query("SELECT COUNT(*) AS c FROM orders WHERE created_at>=?", (today_ts,), one=True)['c']
+        except Exception:
+            pending_cnt = failed_cnt = today_cnt = 0
+        msg_text = (
+            f"👮‍♂️ **管理员控制台**\n"
+            f"🔔 提醒设置：提前 {notify_days} 天\n"
+            f"🗑 清理设置：过期 {cleanup_days} 天\n"
+            f"📊 今日订单：{today_cnt} | 待审核：{pending_cnt} | 失败：{failed_cnt}"
+        )
         keyboard = [
             [InlineKeyboardButton("📦 套餐管理", callback_data="admin_plans_list")],
             [InlineKeyboardButton("👥 用户列表", callback_data="admin_users_list")],
@@ -425,13 +437,25 @@ async def reschedule_anomaly_job(application, interval_hours):
 
 
 
-async def show_orders_menu(update, context, status_filter=None):
+async def show_orders_menu(update, context, status_filter=None, page=0):
+    page = max(int(page or 0), 0)
+    page_size = 20
+    offset = page * page_size
+
     if status_filter:
-        rows = db_query("SELECT * FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT 20", (status_filter,))
+        rows = db_query("SELECT * FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?", (status_filter, page_size, offset))
+        total_row = db_query("SELECT COUNT(*) AS c FROM orders WHERE status=?", (status_filter,), one=True)
+        total = int(total_row['c']) if total_row else 0
         title = f"🧾 **订单审计 - {order_status_label(status_filter)}**"
     else:
-        rows = db_query("SELECT * FROM orders ORDER BY created_at DESC LIMIT 20")
-        title = "🧾 **订单审计 - 最近20条**"
+        rows = db_query("SELECT * FROM orders ORDER BY created_at DESC LIMIT ? OFFSET ?", (page_size, offset))
+        total_row = db_query("SELECT COUNT(*) AS c FROM orders", one=True)
+        total = int(total_row['c']) if total_row else 0
+        title = "🧾 **订单审计 - 最近订单**"
+
+    total_pages = max((total + page_size - 1) // page_size, 1)
+    current_page = min(page + 1, total_pages)
+    title += f"\n📄 第 {current_page}/{total_pages} 页"
 
     keyboard = []
     for row in rows:
@@ -445,12 +469,25 @@ async def show_orders_menu(update, context, status_filter=None):
 
     keyboard.append([
         InlineKeyboardButton("🟡 待审核", callback_data="admin_orders_status_pending"),
+        InlineKeyboardButton("🟠 处理中", callback_data="admin_orders_status_approved"),
+    ])
+    keyboard.append([
         InlineKeyboardButton("✅ 已发货", callback_data="admin_orders_status_delivered"),
+        InlineKeyboardButton("⛔ 已拒绝", callback_data="admin_orders_status_rejected"),
     ])
     keyboard.append([
         InlineKeyboardButton("❌ 失败", callback_data="admin_orders_status_failed"),
         InlineKeyboardButton("📋 全部", callback_data="admin_orders_menu"),
     ])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"admin_orders_page_{status_filter or 'all'}_{page-1}"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"admin_orders_page_{status_filter or 'all'}_{page+1}"))
+    if nav:
+        keyboard.append(nav)
+
     keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
     await send_or_edit_menu(update, context, title, InlineKeyboardMarkup(keyboard))
 
@@ -525,6 +562,15 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         status_filter = data.replace("admin_orders_status_", "")
         await show_orders_menu(update, context, status_filter=status_filter)
         return
+    if data.startswith("admin_orders_page_"):
+        _, _, _, status_raw, page_raw = data.split("_", 4)
+        status_filter = None if status_raw == 'all' else status_raw
+        try:
+            page = int(page_raw)
+        except ValueError:
+            page = 0
+        await show_orders_menu(update, context, status_filter=status_filter, page=page)
+        return
     if data.startswith("admin_order_"):
         order_id = data.replace("admin_order_", "")
         order = db_query("SELECT * FROM orders WHERE order_id = ?", (order_id,), one=True)
@@ -550,6 +596,16 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         uuid_val = data.replace("anomaly_whitelist_del_", "")
         db_execute("DELETE FROM anomaly_whitelist WHERE user_uuid = ?", (uuid_val,))
         await show_anomaly_whitelist_menu(update, context)
+        return
+    if data.startswith("anomaly_quick_whitelist_"):
+        uid = data.replace("anomaly_quick_whitelist_", "")
+        db_execute("INSERT OR IGNORE INTO anomaly_whitelist (user_uuid, created_at) VALUES (?, ?)", (uid, int(time.time())))
+        await query.answer("✅ 已加入白名单", show_alert=False)
+        return
+    if data.startswith("anomaly_quick_enable_"):
+        uid = data.replace("anomaly_quick_enable_", "")
+        await safe_api_request('POST', f"/users/{uid}/actions/enable")
+        await query.answer("✅ 已尝试解封该用户", show_alert=False)
         return
     if data == "admin_plans_list":
         await show_plans_menu(update, context)
@@ -788,15 +844,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id == ADMIN_ID and context.user_data.get('bulk_action') and text:
         action = context.user_data.get('bulk_action')
         try:
+            pending = context.user_data.get('bulk_pending')
+            if pending:
+                if text.strip() != '确认执行':
+                    context.user_data.pop('bulk_pending', None)
+                    context.user_data.pop('bulk_action', None)
+                    await update.message.reply_text(
+                        '已取消批量执行。',
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_bulk_menu")]]),
+                    )
+                    return
+                uuids = pending['uuids']
+                extra = pending.get('extra')
+                ok, fail = await run_bulk_action(safe_api_request, action, uuids, extra_fields=extra)
+                context.user_data.pop('bulk_action', None)
+                context.user_data.pop('bulk_pending', None)
+                await update.message.reply_text(
+                    f"✅ 批量操作完成\n成功: {ok}\n失败: {fail}",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_bulk_menu")]]),
+                )
+                return
+
             if action in {'reset', 'disable', 'delete'}:
                 uuids = parse_uuids(text)
                 extra = None
+                preview = {'reset': '批量重置流量', 'disable': '批量禁用', 'delete': '批量删除'}[action]
             elif action == 'expire':
                 expire_at, uuids = parse_expire_days_and_uuids(text)
                 extra = {'expireAt': expire_at}
+                preview = f"批量改到期时间 -> {expire_at}"
             elif action == 'traffic':
                 traffic_bytes, uuids = parse_traffic_and_uuids(text)
                 extra = {'trafficLimitBytes': traffic_bytes}
+                preview = f"批量改流量包 -> {traffic_bytes // (1024**3)}GB"
             else:
                 await update.message.reply_text("❌ 未知操作类型", reply_markup=cancel_kb)
                 return
@@ -805,13 +885,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ 未解析到有效UUID，请检查输入格式", reply_markup=cancel_kb)
                 return
 
-            ok, fail = await run_bulk_action(safe_api_request, action, uuids, extra_fields=extra)
-            context.user_data.pop('bulk_action', None)
+            context.user_data['bulk_pending'] = {'uuids': uuids, 'extra': extra}
             await update.message.reply_text(
-                f"✅ 批量操作完成\n成功: {ok}\n失败: {fail}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_bulk_menu")]]),
+                f"🧪 预检查完成\n操作: {preview}\n目标数量: {len(uuids)}\n\n如确认执行，请回复：确认执行\n回复其他任意内容将取消。",
+                reply_markup=cancel_kb,
             )
         except Exception as exc:
+            context.user_data.pop('bulk_pending', None)
             await update.message.reply_text(f"❌ 批量操作失败: {exc}", reply_markup=cancel_kb)
         return
     if user_id == ADMIN_ID and 'add_plan_step' in context.user_data and text:
@@ -1181,15 +1261,21 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
             await safe_api_request('POST', f"/users/{uid}/actions/disable")
             try:
                 lines = [
-                    "🚨 **异常检测（可解释）**",
-                    f"用户: `{uid}`",
+                    "🚨 *异常检测（可解释）*",
+                    f"用户: `{escape_markdown_v2(uid)}`",
                     f"风险评分: `{item['score']}`",
-                    f"IP数量: `{item['ip_count']}` | UA分散: `{item['ua_diversity']}` | 请求密度: `{item['density']}`",
+                    f"IP数量: `{item['ip_count']}` \| UA分散: `{item['ua_diversity']}` \| 请求密度: `{item['density']}`",
                     "证据（最近10条）:",
                 ]
                 for ev in item['evidence'][:10]:
-                    lines.append(f"- `{ev['ts']}` | `{ev['ip']}` | `{ev['ua']}`")
-                await context.bot.send_message(ADMIN_ID, '\n'.join(lines), parse_mode='Markdown')
+                    lines.append(
+                        f"- `{escape_markdown_v2(str(ev['ts']))}` \| `{escape_markdown_v2(str(ev['ip']))}` \| `{escape_markdown_v2(str(ev['ua']))}`"
+                    )
+                quick_kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ 加入白名单", callback_data=f"anomaly_quick_whitelist_{uid}")],
+                    [InlineKeyboardButton("✅ 尝试解封", callback_data=f"anomaly_quick_enable_{uid}")],
+                ])
+                await context.bot.send_message(ADMIN_ID, '\n'.join(lines), parse_mode='MarkdownV2', reply_markup=quick_kb)
             except Exception as exc:
                 logger.warning("Failed to notify anomaly admin: %s", exc)
 
@@ -1218,6 +1304,7 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^admin_orders_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^admin_order_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^anomaly_whitelist_"))
+    app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^anomaly_quick_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^bulk_"))
     app.add_handler(CallbackQueryHandler(add_plan_start, pattern="^add_plan_start$"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^client_"))
