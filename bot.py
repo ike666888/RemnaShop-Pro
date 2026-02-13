@@ -7,7 +7,7 @@ import asyncio
 import qrcode
 from io import BytesIO
 from collections import defaultdict
-from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_nodes_status as api_get_nodes_status, close_all_clients
+from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_nodes_status as api_get_nodes_status, close_all_clients, extract_payload
 from services.orders import (
     create_order,
     get_order,
@@ -177,7 +177,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📦 套餐管理", callback_data="admin_plans_list")],
             [InlineKeyboardButton("👥 用户列表", callback_data="admin_users_list")],
             [InlineKeyboardButton("🔔 提醒设置", callback_data="admin_notify"), InlineKeyboardButton("🗑 清理设置", callback_data="admin_cleanup")],
-            [InlineKeyboardButton("🛡️ 异常设置", callback_data="admin_anomaly_menu")]
+            [InlineKeyboardButton("🛡️ 异常设置", callback_data="admin_anomaly_menu")],
+            [InlineKeyboardButton("🧾 订单审计", callback_data="admin_orders_menu")]
         ]
     else:
         msg_text = "👋 **欢迎使用自助服务！**\n请选择操作："
@@ -405,6 +406,49 @@ async def reschedule_anomaly_job(application, interval_hours):
     except Exception as e:
         logger.error(f"Reschedule failed: {e}")
 
+
+
+async def show_orders_menu(update, context, status_filter=None):
+    if status_filter:
+        rows = db_query("SELECT * FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT 20", (status_filter,))
+        title = f"🧾 **订单审计 - {status_filter}**"
+    else:
+        rows = db_query("SELECT * FROM orders ORDER BY created_at DESC LIMIT 20")
+        title = "🧾 **订单审计 - 最近20条**"
+
+    keyboard = []
+    for row in rows:
+        item = dict(row)
+        ts = datetime.datetime.fromtimestamp(int(item['created_at'])).strftime('%m-%d %H:%M')
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{item['status']} | {item['order_id']} | {item['tg_id']} | {ts}",
+                callback_data=f"admin_order_{item['order_id']}",
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("pending", callback_data="admin_orders_status_pending"),
+        InlineKeyboardButton("delivered", callback_data="admin_orders_status_delivered"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton("failed", callback_data="admin_orders_status_failed"),
+        InlineKeyboardButton("all", callback_data="admin_orders_menu"),
+    ])
+    keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
+    await send_or_edit_menu(update, context, title, InlineKeyboardMarkup(keyboard))
+
+
+async def show_anomaly_whitelist_menu(update, context):
+    rows = db_query("SELECT * FROM anomaly_whitelist ORDER BY created_at DESC LIMIT 20")
+    keyboard = [[InlineKeyboardButton("➕ 添加UUID", callback_data="anomaly_whitelist_add")]]
+    for row in rows:
+        item = dict(row)
+        short = item['user_uuid'][:10]
+        keyboard.append([InlineKeyboardButton(f"❌ 删除 {short}...", callback_data=f"anomaly_whitelist_del_{item['user_uuid']}")])
+    keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="admin_anomaly_menu")])
+    await send_or_edit_menu(update, context, "📋 **异常检测白名单**", InlineKeyboardMarkup(keyboard))
+
 async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -423,6 +467,47 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if data == "cancel_op":
         context.user_data.clear()
         await start(update, context)
+        return
+    if data == "admin_orders_menu":
+        await show_orders_menu(update, context)
+        return
+    if data.startswith("admin_orders_status_"):
+        status_filter = data.replace("admin_orders_status_", "")
+        await show_orders_menu(update, context, status_filter=status_filter)
+        return
+    if data.startswith("admin_order_"):
+        order_id = data.replace("admin_order_", "")
+        order = db_query("SELECT * FROM orders WHERE order_id = ?", (order_id,), one=True)
+        if not order:
+            await send_or_edit_menu(update, context, "⚠️ 订单不存在", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_orders_menu")]]))
+            return
+        item = dict(order)
+        created = datetime.datetime.fromtimestamp(int(item['created_at'])).strftime('%Y-%m-%d %H:%M')
+        txt = (
+            f"🧾 **订单详情**\n\n"
+            f"ID: `{item['order_id']}`\n"
+            f"用户: `{item['tg_id']}`\n"
+            f"状态: `{item['status']}`\n"
+            f"类型: `{item['order_type']}`\n"
+            f"套餐: `{item['plan_key']}`\n"
+            f"创建: `{created}`"
+        )
+        kb = [[InlineKeyboardButton("🔙 返回", callback_data="admin_orders_menu")]]
+        if item.get('status') == STATUS_FAILED:
+            kb.insert(0, [InlineKeyboardButton("♻️ 重试发货", callback_data=f"rt_{item['order_id']}")])
+        await send_or_edit_menu(update, context, txt, InlineKeyboardMarkup(kb))
+        return
+    if data == "anomaly_whitelist_menu":
+        await show_anomaly_whitelist_menu(update, context)
+        return
+    if data == "anomaly_whitelist_add":
+        context.user_data['add_anomaly_whitelist'] = True
+        await send_or_edit_menu(update, context, "✍️ 请输入要加入白名单的用户 UUID", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="anomaly_whitelist_menu")]]))
+        return
+    if data.startswith("anomaly_whitelist_del_"):
+        uuid_val = data.replace("anomaly_whitelist_del_", "")
+        db_execute("DELETE FROM anomaly_whitelist WHERE user_uuid = ?", (uuid_val,))
+        await show_anomaly_whitelist_menu(update, context)
         return
     if data == "admin_plans_list":
         await show_plans_menu(update, context)
@@ -520,7 +605,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logger.warning("failed to load anomaly settings: %s", exc)
             interval=1; threshold=50
         msg = (f"🛡️ **异常检测设置**\n\n⏱️ 检测周期：每 {interval} 小时\n🔢 封禁阈值：单周期 > {threshold} 个IP\n\n检测到异常会自动禁用账号并通知您。")
-        kb = [[InlineKeyboardButton("⏱️ 设置周期", callback_data="set_anomaly_interval"), InlineKeyboardButton("🔢 设置阈值", callback_data="set_anomaly_threshold")],[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
+        kb = [[InlineKeyboardButton("⏱️ 设置周期", callback_data="set_anomaly_interval"), InlineKeyboardButton("🔢 设置阈值", callback_data="set_anomaly_threshold")],[InlineKeyboardButton("📋 白名单", callback_data="anomaly_whitelist_menu")],[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
     elif data == "set_anomaly_interval":
         kb = [[InlineKeyboardButton("🔙 取消", callback_data="admin_anomaly_menu")]]
@@ -604,6 +689,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['setting_anomaly_threshold'] = False
             await update.message.reply_text(f"✅ 阈值已更新：> {text} IP 封禁。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_anomaly_menu")]]))
         else: await update.message.reply_text("❌ 请输入整数", reply_markup=cancel_kb)
+        return
+
+    if user_id == ADMIN_ID and context.user_data.get('add_anomaly_whitelist') and text:
+        value = text.strip()
+        if len(value) < 8:
+            await update.message.reply_text("❌ 请输入有效 UUID")
+            return
+        db_execute("INSERT OR IGNORE INTO anomaly_whitelist (user_uuid, created_at) VALUES (?, ?)", (value, int(time.time())))
+        context.user_data['add_anomaly_whitelist'] = False
+        await update.message.reply_text("✅ 白名单已添加。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="anomaly_whitelist_menu")]]))
         return
     if user_id == ADMIN_ID and 'add_plan_step' in context.user_data and text:
         step = context.user_data['add_plan_step']
@@ -702,6 +797,24 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as exc:
             logger.warning("Failed to notify rejected order user %s: %s", order['tg_id'], exc)
         return
+
+    if data.startswith("rt_"):
+        order_id = data.split("_", 1)[1]
+        order = get_order(db_query, order_id)
+        if not order:
+            await query.edit_message_text("⚠️ 订单不存在", reply_markup=admin_return_btn)
+            return
+        if order.get('status') != STATUS_FAILED:
+            await query.edit_message_text("⚠️ 仅允许重试失败订单", reply_markup=admin_return_btn)
+            return
+        switched = update_order_status(db_execute, order_id, [STATUS_FAILED], STATUS_APPROVED, error_message='retry_by_admin')
+        if not switched:
+            await query.edit_message_text("⚠️ 订单状态更新失败，请重试", reply_markup=admin_return_btn)
+            return
+        sid = "0"
+        if order.get('target_uuid') and order.get('target_uuid') != '0':
+            sid = get_short_id(order['target_uuid'])
+        data = f"ap_{order_id}_{sid}"
 
     if not data.startswith("ap_"):
         return
@@ -810,7 +923,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             r = await safe_api_request('POST', "/users", json_data=payload)
             if r and r.status_code in [200, 201]:
-                resp_data = r.json().get('response', r.json())
+                resp_data = extract_payload(r)
                 user_uuid = resp_data.get('uuid')
                 db_execute(
                     "INSERT INTO subscriptions (tg_id, uuid, created_at, plan_key) VALUES (?, ?, ?, ?)",
@@ -868,15 +981,18 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
                 if 0 <= days_left <= notify_days:
                     last_notify_expire = u_dict.get('last_notify_expire_at')
                     last_notify_days_left = u_dict.get('last_notify_days_left')
-                    if str(last_notify_expire or '') != ex_str or int(last_notify_days_left or -999) != days_left:
+                    last_notify_at = int(u_dict.get('last_notify_at') or 0)
+                    now_ts = int(time.time())
+                    can_send_by_daily_limit = (now_ts - last_notify_at) >= 20 * 3600
+                    if (str(last_notify_expire or '') != ex_str or int(last_notify_days_left or -999) != days_left) and can_send_by_daily_limit:
                         sid = get_short_id(u_dict['uuid'])
                         kb = [[InlineKeyboardButton("💳 立即续费", callback_data=f"selrenew_{sid}")]]
                         msg = f"⚠️ **续费提醒**\n\n您的订阅 (UUID: `{u_dict['uuid'][:8]}...`) \n将在 **{days_left}** 天后到期。\n请及时续费以免服务中断。"
                         try:
                             await context.bot.send_message(u_dict['tg_id'], msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
                             db_execute(
-                                "UPDATE subscriptions SET last_notify_expire_at = ?, last_notify_days_left = ? WHERE uuid = ?",
-                                (ex_str, days_left, u_dict['uuid']),
+                                "UPDATE subscriptions SET last_notify_expire_at = ?, last_notify_days_left = ?, last_notify_at = ? WHERE uuid = ?",
+                                (ex_str, days_left, int(time.time()), u_dict['uuid']),
                             )
                         except Exception as exc:
                             logger.warning("Failed to send expiry notice to %s: %s", u_dict['tg_id'], exc)
@@ -903,15 +1019,47 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
         resp = await safe_api_request('GET', '/subscription-request-history')
         if not resp or resp.status_code != 200:
             return
-        logs = resp.json().get('response', [])
-        if not logs:
+        logs = extract_payload(resp)
+        if not isinstance(logs, list) or not logs:
             return
+
+        val_scan = db_query("SELECT value FROM settings WHERE key='anomaly_last_scan_ts'", one=True)
+        last_scan_ts = int(val_scan['value']) if val_scan else 0
+        whitelist_rows = db_query("SELECT user_uuid FROM anomaly_whitelist")
+        whitelist = {dict(r)['user_uuid'] for r in whitelist_rows}
+
+        def _extract_log_ts(log):
+            for key in ('createdAt', 'requestAt', 'timestamp', 'time'):
+                value = log.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, (int, float)):
+                    return int(value)
+                if isinstance(value, str):
+                    try:
+                        if value.isdigit():
+                            return int(value)
+                        dt = datetime.datetime.strptime(value.split('.')[0].replace('Z', ''), "%Y-%m-%dT%H:%M:%S")
+                        return int(dt.timestamp())
+                    except Exception:
+                        continue
+            return 0
+
         user_ip_map = defaultdict(set)
+        max_seen_ts = last_scan_ts
         for log in logs:
+            row_ts = _extract_log_ts(log)
+            if row_ts and row_ts <= last_scan_ts:
+                continue
+            if row_ts > max_seen_ts:
+                max_seen_ts = row_ts
             uid = log.get('userUuid')
             ip = log.get('ip')
+            if uid in whitelist:
+                continue
             if uid and ip:
                 user_ip_map[uid].add(ip)
+
         for uid, ips in user_ip_map.items():
             if len(ips) > limit:
                 await safe_api_request('POST', f"/users/{uid}/actions/disable")
@@ -919,6 +1067,9 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(ADMIN_ID, f"🚨 **异常检测**\n\n用户 `{uid}` 使用了 {len(ips)} 个IP。\n已自动禁用。")
                 except Exception as exc:
                     logger.warning("Failed to notify anomaly admin: %s", exc)
+
+        if max_seen_ts > last_scan_ts:
+            db_execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('anomaly_last_scan_ts', ?)", (str(max_seen_ts),))
     except Exception as exc:
         logger.exception("check_anomalies_job failed: %s", exc)
 
@@ -938,6 +1089,9 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^set_strategy_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^reply_user_")) 
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^set_anomaly_"))
+    app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^admin_orders_"))
+    app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^admin_order_"))
+    app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^anomaly_whitelist_"))
     app.add_handler(CallbackQueryHandler(add_plan_start, pattern="^add_plan_start$"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^client_"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^selrenew_"))
@@ -947,7 +1101,7 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^contact_support$"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^client_nodes$"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^view_sub_"))
-    app.add_handler(CallbackQueryHandler(process_order, pattern="^(ap|rj)_"))
+    app.add_handler(CallbackQueryHandler(process_order, pattern="^(ap|rj|rt)_"))
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
     app.job_queue.run_daily(check_expiry_job, time=datetime.time(hour=12, minute=0, second=0))

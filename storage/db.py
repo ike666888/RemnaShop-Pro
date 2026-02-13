@@ -1,10 +1,17 @@
 import sqlite3
-import time
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
+
+
+def _connect(db_file: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_file)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
 
 
 def init_db(db_file: str) -> None:
-    conn = sqlite3.connect(db_file)
+    conn = _connect(db_file)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS plans (key TEXT PRIMARY KEY, name TEXT, price TEXT, days INTEGER, gb INTEGER, reset_strategy TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, uuid TEXT, created_at TIMESTAMP)''')
@@ -21,6 +28,10 @@ def init_db(db_file: str) -> None:
         pass
     try:
         c.execute("ALTER TABLE subscriptions ADD COLUMN last_notify_days_left INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE subscriptions ADD COLUMN last_notify_at INTEGER")
     except sqlite3.OperationalError:
         pass
     try:
@@ -48,15 +59,23 @@ def init_db(db_file: str) -> None:
         )'''
     )
 
+    c.execute('''CREATE TABLE IF NOT EXISTS anomaly_whitelist (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_uuid TEXT UNIQUE,
+        created_at INTEGER NOT NULL
+    )''')
+
     c.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_tg_id ON subscriptions (tg_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_uuid ON subscriptions (uuid)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_orders_tg_id_status ON orders (tg_id, status)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders (order_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders (status, created_at DESC)")
 
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_days', '3')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cleanup_days', '7')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('anomaly_interval', '1')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('anomaly_threshold', '50')")
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('anomaly_last_scan_ts', '0')")
 
     c.execute("SELECT count(*) FROM plans")
     if c.fetchone()[0] == 0:
@@ -68,18 +87,16 @@ def init_db(db_file: str) -> None:
 
 
 def db_query(db_file: str, query: str, args: Iterable[Any] = (), one: bool = False):
-    conn = sqlite3.connect(db_file)
-    conn.row_factory = sqlite3.Row
+    conn = _connect(db_file)
     cur = conn.cursor()
     cur.execute(query, tuple(args))
     rv = cur.fetchall()
-    conn.commit()
     conn.close()
     return (rv[0] if rv else None) if one else rv
 
 
 def db_execute(db_file: str, query: str, args: Iterable[Any] = ()) -> int:
-    conn = sqlite3.connect(db_file)
+    conn = _connect(db_file)
     cur = conn.cursor()
     cur.execute(query, tuple(args))
     conn.commit()

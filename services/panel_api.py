@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from typing import Optional
 
 import httpx
 
@@ -16,6 +15,16 @@ def _get_client(verify_tls: bool) -> httpx.AsyncClient:
         client = httpx.AsyncClient(timeout=20.0, verify=verify_tls)
         _CLIENTS[verify_tls] = client
     return client
+
+
+def extract_payload(resp: httpx.Response):
+    data = resp.json()
+    if isinstance(data, dict):
+        if 'response' in data:
+            return data['response']
+        if 'data' in data:
+            return data['data']
+    return data
 
 
 async def close_all_clients() -> None:
@@ -71,13 +80,13 @@ async def safe_api_request(method, endpoint, panel_url, headers, verify_tls=True
 async def get_panel_user(uuid, panel_url, headers, verify_tls=True):
     resp = await safe_api_request('GET', f"/users/{uuid}", panel_url, headers, verify_tls)
     if resp and resp.status_code == 200:
-        return resp.json().get('response', resp.json())
+        return extract_payload(resp)
     return None
 
 
 async def get_nodes_status(panel_url, headers, verify_tls=True):
     resp = await safe_api_request('GET', '/nodes', panel_url, headers, verify_tls)
     if resp and resp.status_code == 200:
-        data = resp.json()
-        return data.get('response', data.get('data', []))
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, list) else []
     return []
