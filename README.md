@@ -1,194 +1,91 @@
 # 🚀 RemnaShop-Pro
 
-
-
-**RemnaShop-Pro** 是专为 **Remnawave** 面板打造的专业级 Telegram 自动售卖与管理机器人。
-
-它采用全异步架构设计，支持高并发处理，集成了流量可视化、二维码订阅、节点监控及自动化运维功能，旨在为您提供无需人工值守的商业级运营体验。
-
-
+RemnaShop-Pro 是一个面向 **Remnawave Panel** 的 Telegram 销售与运维机器人，支持支付审核、自动发货、异常风控和批量运营。
 
 ---
 
+## ✨ 主要功能
 
+### 👤 用户端
+- 套餐购买 / 续费下单
+- 订阅信息查看（流量、到期、订阅链接、二维码）
+- 节点状态查看
+- 客服消息转发
 
-## ✨ 核心功能 (Features)
+### 👮 管理端
+- 套餐管理（增删 + 流量策略）
+- 用户管理（单用户重置流量、删除、请求历史）
+- 订单审计（pending/approved/rejected/delivered/failed）
+- 失败订单重试发货
+- 异常检测（可解释告警：风险评分 + 证据）
+- 异常白名单管理
+- **批量用户操作（Bulk）**
+  - 批量重置流量
+  - 批量禁用
+  - 批量删除
+  - 批量修改到期日
+  - 批量修改流量包
 
-
-
-* **⚡️ 极致性能**：基于 `httpx` 全异步重构，消除阻塞，秒级响应。
-
-* **📊 可视化交互**：
-
-* 流量使用情况显示为进度条 `[████░░] 60%`。
-
-* 订阅链接自动生成 **二维码图片**，手机扫码即连。
-
-* **🤖 自动化运维**：
-
-* **到期提醒**：自定义天数，自动发送续费通知。
-
-* **自动清理**：自动检测并删除过期超过指定天数的僵尸用户。
-
-* **🛡️ 安全机制**：内置防抖动（Anti-Flood）限流，保护面板 API 不被滥用。
-
-* **🌍 节点监控**：用户端可实时查询所有节点的在线/离线状态。
-
-* **👮‍♂️ 完善的管理端**：通过 TG 机器人即可完成套餐管理、用户查询、删除、策略配置等操作。
-
-
-
----
-
-
-
-## 🛠️ 环境要求 (Prerequisites)
-
-
-
-在部署之前，请确保您拥有：
-
-1. 一台连接互联网的 **VPS** (Debian/Ubuntu 推荐)。
-
-2. 已部署好的 **Remnawave 面板**。
-
-3. **Remnawave API Token** (在面板设置中获取)。
-
-4. **Telegram Bot Token** (通过 @BotFather 获取)。
-
-5. **Telegram Admin ID** (您的 TG 用户 ID，通过 @userinfobot 获取)。
-
-
+### 🧱 架构（已拆分）
+- `bot.py`：入口和主路由
+- `services/panel_api.py`：Panel API 请求、重试、连接复用
+- `services/orders.py`：订单状态机、失败原因分类、审计写入
+- `storage/db.py`：SQLite 初始化与访问
+- `handlers/bulk_actions.py`：批量操作解析与执行
+- `handlers/admin.py` / `handlers/client.py`：管理端、用户端可复用渲染逻辑
+- `jobs/anomaly.py` / `jobs/expiry.py`：异常检测与到期策略辅助逻辑
+- `utils/formatting.py`：MarkdownV2 转义
 
 ---
 
+## 🛠 环境要求
+- Debian / Ubuntu VPS
+- Python 3.9+
+- 可访问 Remnawave Panel API
+- Telegram Bot Token
 
+---
 
-## 🚀 一键安装 / 更新 (Installation)
-
-
-
-我们提供了一键全自动化脚本，自动处理环境依赖（Python3, pip, Systemd守护进程）。
-
-**支持 安装、无损升级、卸载。**
-
-
-
-请在 VPS 终端执行以下命令：
-
-
+## 🚀 一键安装 / 更新
 
 ```bash
-
 bash <(curl -sL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/install.sh)
-
 ```
 
-### 安装步骤说明：
-
-1. 运行脚本后，选择 `1. 🛠 安装 / 更新`。
-
-2. 脚本会自动安装 `python3`、`pip` 及所需依赖库。
-
-3. **首次安装**会依次询问以下配置信息，请按提示输入：
-
-* 管理员 TG ID
-
-* 机器人 Token
-
-* 面板地址 (例如 `https://panel.example.com`)
-
-* 面板 API Token
-
-* 订阅域名
-
-* 默认用户组 UUID
-
-4. 安装完成后，机器人会自动启动并设置为开机自启。
-
-
+安装脚本会：
+1. 安装 Python / pip 依赖
+2. 同步 `bot.py` 与 `services/ storage/ handlers/ jobs/ utils/` 代码
+3. 首次生成 `config.json`
+4. 创建并启动 `systemd` 服务 `remnashop`
 
 ---
 
+## ⚙️ 配置文件
+默认路径：`/opt/RemnaShop/config.json`
 
-
-## 📖 使用指南 (Usage)
-
-
-
-### 👮‍♂️ 管理员指令
-
-* `/start` - 唤出管理控制台。
-
-* **📦 套餐管理**：添加、删除售卖套餐，设置流量重置策略。
-
-* **👥 用户列表**：查看最近订阅用户，支持一键删除。
-
-* **🔔 提醒设置**：配置到期前第几天发送提醒。
-
-* **🗑 清理设置**：配置过期后第几天自动删除用户。
-
-
-
-### 👤 用户端功能
-
-* **🛒 购买订阅**：选择套餐 -> 发送口令红包 -> 等待审核 -> 自动发货。
-
-* **🔍 我的订阅**：查看流量进度条、到期时间，获取订阅链接及二维码。
-
-* **🌍 节点状态**：查看节点存活情况。
-
-* **🆘 联系客服**：向管理员发送消息（支持图文），管理员可直接回复。
-
-
+关键字段：
+- `admin_id`
+- `bot_token`
+- `panel_url`
+- `panel_token`
+- `sub_domain`
+- `group_uuid`
+- `panel_verify_tls`（默认 true）
 
 ---
 
-
-
-## ⚙️ 目录结构
-
-
-
-* **程序目录**：`/opt/RemnaShop`
-
-* **配置文件**：`/opt/RemnaShop/config.json` (自动生成)
-
-* **数据库**：`/opt/RemnaShop/starlight.db` (SQLite)
-
-* **服务名称**：`remnashop.service`
-
-
-
-### 常用维护命令
-
-
-
+## 🔧 运维命令
 ```bash
-
-# 查看运行日志
-
 journalctl -u remnashop -f
-
-
-
-# 重启机器人
-
 systemctl restart remnashop
-
-
-
-# 停止机器人
-
-systemctl stop remnashop
-
+systemctl status remnashop
 ```
+
+---
+
 ## 📞 联系与支持
 * **作者**：ike
-
 * **交流群组**：[点击加入 Remnawave 中文交流群](https://t.me/Remnawarecn)
-
-
 
 ---
 
