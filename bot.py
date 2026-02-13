@@ -7,7 +7,7 @@ import asyncio
 import qrcode
 from io import BytesIO
 from collections import defaultdict
-from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_nodes_status as api_get_nodes_status, close_all_clients, extract_payload
+from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, close_all_clients, extract_payload
 from services.orders import (
     create_order,
     get_order,
@@ -145,6 +145,13 @@ async def get_panel_user(uuid):
 
 async def get_nodes_status():
     return await api_get_nodes_status(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+async def get_subscription_history_stats():
+    return await api_get_subscription_history_stats(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_user_subscription_history(uuid):
+    return await api_get_user_subscription_history(uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
 
 async def send_or_edit_menu(update, context, text, reply_markup):
@@ -562,8 +569,36 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         panel_info = await get_panel_user(target_uuid)
         status = "🟢 面板正常" if panel_info else "🔴 面板已删"
         msg = (f"👤 **用户详情**\nTG ID: `{dict(sub)['tg_id']}`\n状态: {status}\nUUID: `{target_uuid}`")
-        keyboard = [[InlineKeyboardButton("🔄 重置流量", callback_data=f"reset_traffic_{target_uuid}")], [InlineKeyboardButton("🗑 确认删除用户", callback_data=f"confirm_del_user_{target_uuid}")], [InlineKeyboardButton("🔙 返回列表", callback_data=f"list_user_subs_{dict(sub)['tg_id']}")]]
+        keyboard = [
+            [InlineKeyboardButton("🔄 重置流量", callback_data=f"reset_traffic_{target_uuid}")],
+            [InlineKeyboardButton("📜 最近请求记录", callback_data=f"user_reqhist_{target_uuid}")],
+            [InlineKeyboardButton("🗑 确认删除用户", callback_data=f"confirm_del_user_{target_uuid}")],
+            [InlineKeyboardButton("🔙 返回列表", callback_data=f"list_user_subs_{dict(sub)['tg_id']}")],
+        ]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
+    elif data.startswith("user_reqhist_"):
+        target_uuid = data.replace("user_reqhist_", "")
+        sub = db_query("SELECT * FROM subscriptions WHERE uuid = ?", (target_uuid,), one=True)
+        history = await get_user_subscription_history(target_uuid)
+        records = history.get('records') if isinstance(history, dict) else None
+        total = history.get('total') if isinstance(history, dict) else None
+        if not isinstance(records, list):
+            records = []
+        lines = [f"📜 **请求记录（最近{len(records)}条）**", f"UUID: `{target_uuid}`"]
+        if isinstance(total, int):
+            lines.append(f"总记录数: `{total}`")
+        lines.append("")
+        if not records:
+            lines.append("暂无请求记录")
+        else:
+            for rec in records[:10]:
+                req_at = format_time(rec.get('requestAt'))
+                req_ip = rec.get('requestIp') or '未知IP'
+                ua = (rec.get('userAgent') or '未知UA')[:40]
+                lines.append(f"• `{req_at}` | `{req_ip}` | `{ua}`")
+        back_tg = dict(sub)['tg_id'] if sub else ADMIN_ID
+        kb = [[InlineKeyboardButton("🔙 返回用户", callback_data=f"manage_user_{target_uuid}")], [InlineKeyboardButton("🔙 返回列表", callback_data=f"list_user_subs_{back_tg}")]]
+        await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup(kb))
     elif data.startswith("reset_traffic_"):
         target_uuid = data.replace("reset_traffic_", "")
         resp = await safe_api_request('POST', f"/users/{target_uuid}/actions/reset-traffic")
@@ -604,7 +639,22 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception as exc:
             logger.warning("failed to load anomaly settings: %s", exc)
             interval=1; threshold=50
-        msg = (f"🛡️ **异常检测设置**\n\n⏱️ 检测周期：每 {interval} 小时\n🔢 封禁阈值：单周期 > {threshold} 个IP\n\n检测到异常会自动禁用账号并通知您。")
+        stats = await get_subscription_history_stats()
+        by_app = stats.get('byParsedApp') if isinstance(stats, dict) else None
+        app_top = "暂无"
+        if isinstance(by_app, list) and by_app:
+            top = sorted(by_app, key=lambda x: x.get('count', 0), reverse=True)[:3]
+            app_top = ", ".join(f"{(x.get('app') or 'unknown')}:{int(x.get('count', 0))}" for x in top)
+        hourly = stats.get('hourlyRequestStats') if isinstance(stats, dict) else None
+        hourly_last = int(hourly[-1].get('requestCount', 0)) if isinstance(hourly, list) and hourly else 0
+        msg = (
+            f"🛡️ **异常检测设置**\n\n"
+            f"⏱️ 检测周期：每 {interval} 小时\n"
+            f"🔢 封禁阈值：单周期 > {threshold} 个IP\n"
+            f"📊 最近1小时请求量：`{hourly_last}`\n"
+            f"📱 TOP客户端：`{app_top}`\n\n"
+            "检测到异常会自动禁用账号并通知您。"
+        )
         kb = [[InlineKeyboardButton("⏱️ 设置周期", callback_data="set_anomaly_interval"), InlineKeyboardButton("🔢 设置阈值", callback_data="set_anomaly_threshold")],[InlineKeyboardButton("📋 白名单", callback_data="anomaly_whitelist_menu")],[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
     elif data == "set_anomaly_interval":
@@ -1083,6 +1133,7 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^plan_detail_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^cancel_op$"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^manage_user_")) 
+    app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^user_reqhist_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^list_user_subs_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^confirm_del_user_")) 
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^reset_traffic_"))

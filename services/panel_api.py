@@ -90,3 +90,19 @@ async def get_nodes_status(panel_url, headers, verify_tls=True):
         payload = extract_payload(resp)
         return payload if isinstance(payload, list) else []
     return []
+
+
+async def get_subscription_history_stats(panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', '/subscription-request-history/stats', panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+async def get_user_subscription_history(uuid, panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', f"/users/{uuid}/subscription-request-history", panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, dict) else {}
+    return {}
