@@ -93,7 +93,7 @@ journalctl -u remnashop -f
 systemctl restart remnashop
 systemctl status remnashop
 ```
-
+```
 # 查看状态
 systemctl status remnashop
 ```
