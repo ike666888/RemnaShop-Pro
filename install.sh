@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # 定义颜色
 GREEN='\033[0;32m'
@@ -17,7 +18,7 @@ fi
 show_menu() {
     clear
     echo -e "${GREEN}=============================================${NC}"
-    echo -e "${GREEN}        RemnaShop-Pro 管理脚本 V2.4          ${NC}"
+    echo -e "${GREEN}        RemnaShop-Pro 管理脚本 V2.5          ${NC}"
     echo -e "${GREEN}=============================================${NC}"
     echo -e "1. 🛠  安装 / 更新 (保留数据库)"
     echo -e "2. 🗑  卸载全部 (删除数据)"
@@ -43,7 +44,7 @@ install_bot() {
     fi
 
     echo -e "${YELLOW}正在安装/更新 Python 依赖...${NC}"
-    pip3 install python-telegram-bot[job-queue] requests httpx qrcode[pil] --break-system-packages
+    pip3 install python-telegram-bot[job-queue] httpx qrcode[pil] --break-system-packages
 
     if [ ! -d "$WORK_DIR" ]; then
         mkdir -p "$WORK_DIR"
@@ -51,10 +52,20 @@ install_bot() {
     fi
 
     echo -e "${YELLOW}正在拉取最新代码...${NC}"
-    curl -o $WORK_DIR/bot.py https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/bot.py
+    mkdir -p "$WORK_DIR/services" "$WORK_DIR/storage" "$WORK_DIR/utils" "$WORK_DIR/handlers" "$WORK_DIR/jobs"
+    curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/bot.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/bot.py
+    curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/services/orders.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/services/orders.py
+    curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/services/panel_api.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/services/panel_api.py
+    curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/storage/db.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/storage/db.py
+    curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/utils/formatting.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/utils/formatting.py
+    curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/handlers/bulk_actions.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/handlers/bulk_actions.py
+    curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/handlers/admin.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/handlers/admin.py
+    curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/handlers/client.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/handlers/client.py
+    curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/jobs/anomaly.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/jobs/anomaly.py
+    curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/jobs/expiry.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/jobs/expiry.py
 
     chmod +x "$WORK_DIR/bot.py"
-    echo -e "${GREEN}已赋予脚本执行权限。${NC}"
+    echo -e "${GREEN}代码文件同步完成。${NC}"
 
     if [ ! -f "$WORK_DIR/config.json" ]; then
         echo -e "${YELLOW}>>> 检测到首次运行，请配置参数:${NC}"
@@ -64,6 +75,12 @@ install_bot() {
         read -p "请输入面板 API Token: " PANEL_TOKEN
         read -p "请输入订阅域名 (例如 https://sub.com): " SUB_DOMAIN
         read -p "请输入默认用户组 UUID: " GROUP_UUID
+        read -p "是否校验面板 HTTPS 证书? (Y/n): " VERIFY_TLS_INPUT
+        if [ -z "$VERIFY_TLS_INPUT" ] || [[ "$VERIFY_TLS_INPUT" =~ ^[Yy]$ ]]; then
+            VERIFY_TLS=true
+        else
+            VERIFY_TLS=false
+        fi
 
         cat > "$WORK_DIR/config.json" <<EOF
 {
@@ -72,7 +89,8 @@ install_bot() {
     "panel_url": "$PANEL_URL",
     "panel_token": "$PANEL_TOKEN",
     "sub_domain": "$SUB_DOMAIN",
-    "group_uuid": "$GROUP_UUID"
+    "group_uuid": "$GROUP_UUID",
+    "panel_verify_tls": $VERIFY_TLS
 }
 EOF
         echo -e "${GREEN}配置文件创建成功。${NC}"
