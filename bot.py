@@ -441,6 +441,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("🛒 购买新订阅", callback_data="client_buy_new")],
             [InlineKeyboardButton("🔍 我的订阅 / 续费", callback_data="client_status")],
+            [InlineKeyboardButton("📄 我的订单", callback_data="client_orders")],
             [InlineKeyboardButton("🌍 节点状态", callback_data="client_nodes"), InlineKeyboardButton("🆘 联系客服", callback_data="contact_support")]
         ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -485,6 +486,63 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         msg = "📞 **客服模式已开启**\n请直接发送文字、图片或文件。\n🚪 结束咨询请点击下方按钮。"
         keyboard = [[InlineKeyboardButton("🚪 结束咨询", callback_data="back_home")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
+        return
+
+    if data == "client_orders":
+        rows = db_query("SELECT * FROM orders WHERE tg_id=? ORDER BY created_at DESC LIMIT 12", (user_id,))
+        if not rows:
+            await send_or_edit_menu(update, context, "📄 **我的订单**\n暂无订单记录。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+            return
+        keyboard = []
+        for row in rows:
+            item = dict(row)
+            ts = datetime.datetime.fromtimestamp(int(item['created_at'])).strftime('%m-%d %H:%M')
+            keyboard.append([InlineKeyboardButton(f"{order_status_label(item['status'])} | {item['order_id']} | {ts}", callback_data=f"client_order_{item['order_id']}")])
+        keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
+        await send_or_edit_menu(update, context, "📄 **我的订单（最近12条）**", InlineKeyboardMarkup(keyboard))
+        return
+
+    if data.startswith("client_order_cancel_"):
+        order_id = data.replace("client_order_cancel_", "")
+        order = get_order(db_query, order_id)
+        if not order or int(order.get('tg_id', 0)) != int(user_id):
+            await query.answer("订单不存在", show_alert=True)
+            return
+        ok = update_order_status(db_execute, order_id, [STATUS_PENDING], STATUS_REJECTED, error_message='cancelled_by_user')
+        if ok:
+            append_order_audit_log(db_execute, order_id, 'cancel_by_user', user_id, 'user_cancel_pending_order')
+            await query.answer("✅ 已取消订单", show_alert=True)
+        else:
+            await query.answer("⚠️ 仅待审核订单可取消", show_alert=True)
+        return
+
+    if data.startswith("client_order_"):
+        order_id = data.replace("client_order_", "")
+        order = get_order(db_query, order_id)
+        if not order or int(order.get('tg_id', 0)) != int(user_id):
+            await send_or_edit_menu(update, context, "⚠️ 订单不存在或无权限查看", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="client_orders")]]))
+            return
+        plan = db_query("SELECT * FROM plans WHERE key = ?", (order['plan_key'],), one=True)
+        plan_name = dict(plan)['name'] if plan else order['plan_key']
+        created = datetime.datetime.fromtimestamp(int(order['created_at'])).strftime('%Y-%m-%d %H:%M')
+        lines = [
+            "📄 **订单详情**",
+            f"订单号: `{order['order_id']}`",
+            f"状态: `{order_status_label(order['status'])}`",
+            f"类型: `{ '续费' if order['order_type'] == 'renew' else '新购' }`",
+            f"套餐: `{plan_name}`",
+            f"渠道: `{order.get('channel_code') or '-'}`",
+            f"创建时间: `{created}`",
+        ]
+        if order.get('delivered_uuid'):
+            lines.append(f"发货UUID: `{order['delivered_uuid']}`")
+        if order.get('error_message'):
+            lines.append(f"失败原因: `{order['error_message']}`")
+        kb = []
+        if order['status'] == STATUS_PENDING:
+            kb.append([InlineKeyboardButton("❌ 取消该订单", callback_data=f"client_order_cancel_{order['order_id']}")])
+        kb.append([InlineKeyboardButton("🔙 返回订单列表", callback_data="client_orders")])
+        await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup(kb))
         return
 
     if data == "client_buy_new":
@@ -2178,7 +2236,7 @@ if __name__ == '__main__':
     except Exception as exc:
         logger.warning("Failed to reschedule anomaly job at startup: %s", exc)
 
-    print(f"🚀 RemnaShop-Pro V2.9 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V3.0 已启动 | 监听中...")
     try:
         app.run_polling()
     finally:

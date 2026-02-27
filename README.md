@@ -2,7 +2,7 @@
 
 RemnaShop-Pro 是一个面向 **Remnawave Panel** 的 Telegram 售卖与运维机器人，覆盖“下单审核、自动发货、批量运营、异常风控、客服转发”的完整闭环。
 
-当前版本：`V2.9`
+当前版本：`V3.0`
 
 ---
 
@@ -64,7 +64,6 @@ RemnaShop-Pro 是一个面向 **Remnawave Panel** 的 Telegram 售卖与运维�
 - `utils/formatting.py`：MarkdownV2 转义
 
 ---
-
 
 
 ## 🛠 环境要求
