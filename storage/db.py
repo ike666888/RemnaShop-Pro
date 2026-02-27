@@ -59,6 +59,12 @@ def init_db(db_file: str) -> None:
         )'''
     )
 
+
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN channel_code TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     c.execute('''CREATE TABLE IF NOT EXISTS anomaly_whitelist (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_uuid TEXT UNIQUE,
@@ -71,6 +77,26 @@ def init_db(db_file: str) -> None:
         action TEXT NOT NULL,
         actor_id INTEGER,
         detail TEXT,
+        created_at INTEGER NOT NULL
+    )''')
+
+
+    c.execute('''CREATE TABLE IF NOT EXISTS bulk_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        result_json TEXT,
+        created_by INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS ops_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_by INTEGER,
         created_at INTEGER NOT NULL
     )''')
 
@@ -94,6 +120,8 @@ def init_db(db_file: str) -> None:
     c.execute("CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders (status, created_at DESC)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_order_audit_order_id ON order_audit_logs (order_id, created_at DESC)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_user_created ON anomaly_events (user_uuid, created_at DESC)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_bulk_jobs_status_created ON bulk_jobs (status, created_at DESC)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_ops_templates_created ON ops_templates (created_at DESC)")
 
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_days', '3')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cleanup_days', '7')")
@@ -101,6 +129,7 @@ def init_db(db_file: str) -> None:
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('anomaly_threshold', '50')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('risk_low_score', '80')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('risk_high_score', '130')")
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('risk_enforce_mode', 'enforce')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('anomaly_last_scan_ts', '0')")
 
     c.execute("SELECT count(*) FROM plans")

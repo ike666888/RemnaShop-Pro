@@ -206,6 +206,38 @@ def set_risk_watchlist(items):
     set_json_setting('risk_watchlist', sorted({str(x) for x in items if x}))
 
 
+def enqueue_bulk_job(action, uuids, extra, created_by):
+    now = int(time.time())
+    payload = {'uuids': uuids, 'extra': extra or {}}
+    db_execute(
+        "INSERT INTO bulk_jobs (action, payload_json, status, created_by, created_at, updated_at) VALUES (?, ?, 'pending', ?, ?, ?)",
+        (action, json.dumps(payload, ensure_ascii=False), int(created_by or 0), now, now),
+    )
+
+
+def save_ops_template(name, payload, created_by):
+    now = int(time.time())
+    db_execute(
+        "INSERT INTO ops_templates (name, payload_json, created_by, created_at) VALUES (?, ?, ?, ?)",
+        (str(name)[:60], json.dumps(payload, ensure_ascii=False), int(created_by or 0), now),
+    )
+
+
+def get_builtin_templates():
+    return {
+        'tpl_strict': {'name': '严格风控模板', 'settings': {'risk_enforce_mode': 'enforce', 'risk_low_score': '70', 'risk_high_score': '120', 'anomaly_interval': '0.5'}},
+        'tpl_stable': {'name': '稳定运营模板', 'settings': {'risk_enforce_mode': 'gray', 'risk_low_score': '80', 'risk_high_score': '130', 'anomaly_interval': '1'}},
+        'tpl_growth': {'name': '增长推广模板', 'settings': {'risk_enforce_mode': 'observe', 'risk_low_score': '90', 'risk_high_score': '160', 'anomaly_interval': '1'}},
+    }
+
+
+def apply_template_payload(payload, actor='系统'):
+    settings = payload.get('settings', {}) if isinstance(payload, dict) else {}
+    for k, v in settings.items():
+        set_setting_value(k, v)
+    append_ops_timeline('模板', '应用运营模板', json.dumps(settings, ensure_ascii=False)[:180], actor=actor)
+
+
 def panel_config_ready():
     return bool(PANEL_URL and PANEL_TOKEN and SUB_DOMAIN and TARGET_GROUP_UUID)
 
@@ -362,6 +394,12 @@ async def send_or_edit_menu(update, context, text, reply_markup):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     user_id = update.effective_user.id
+    args = getattr(context, 'args', None) or []
+    if args:
+        raw = str(args[0]).strip()
+        if raw:
+            channel_code = raw[2:] if raw.startswith('c_') else raw
+            context.user_data['channel_code'] = channel_code[:32]
     if user_id == ADMIN_ID:
         try:
             val_notify = db_query("SELECT value FROM settings WHERE key='notify_days'", one=True)
@@ -395,7 +433,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⚙️ 订阅设置", callback_data="admin_subscription_settings"), InlineKeyboardButton("🧩 用户分组", callback_data="admin_squads_menu")],
             [InlineKeyboardButton("📈 带宽看板", callback_data="admin_bandwidth_dashboard"), InlineKeyboardButton("🛡️ 风控策略", callback_data="admin_risk_policy")],
             [InlineKeyboardButton("🕒 操作时间线", callback_data="admin_ops_timeline"), InlineKeyboardButton("📢 群发通知", callback_data="admin_broadcast_start")],
-            [InlineKeyboardButton("💳 收款设置", callback_data="admin_pay_settings"), InlineKeyboardButton("🔌 面板配置", callback_data="admin_panel_config")]
+            [InlineKeyboardButton("💳 收款设置", callback_data="admin_pay_settings"), InlineKeyboardButton("🔌 面板配置", callback_data="admin_panel_config")],
+            [InlineKeyboardButton("🧩 模板中心", callback_data="admin_template_center"), InlineKeyboardButton("🗂 批量任务", callback_data="admin_bulk_jobs")]
         ]
     else:
         msg_text = "👋 **欢迎使用自助服务！**\n请选择操作："
@@ -605,9 +644,9 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
     if update.callback_query and update.callback_query.message:
         msg_id = update.callback_query.message.message_id
 
-    order, created = create_order(db_query, db_execute, user_id, plan_key, order_type, target_uuid, menu_message_id=msg_id)
+    order, created = create_order(db_query, db_execute, user_id, plan_key, order_type, target_uuid, menu_message_id=msg_id, channel_code=context.user_data.get('channel_code'))
     if created:
-        append_order_audit_log(db_execute, order['order_id'], 'create', user_id, f'type={order_type};plan={plan_key}')
+        append_order_audit_log(db_execute, order['order_id'], 'create', user_id, f"type={order_type};plan={plan_key};channel={context.user_data.get('channel_code') or '-'}")
 
     type_str = "续费" if order_type == 'renew' else "新购"
     back_data = f"view_sub_{short_id}" if order_type == 'renew' else "client_buy_new"
@@ -774,6 +813,64 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         append_ops_timeline('配置', '切换TLS校验', f'panel_verify_tls={new_val}', actor=query.from_user.id)
         await query.answer(f"已切换为 {new_val}", show_alert=True)
         await send_or_edit_menu(update, context, "✅ TLS 配置已更新。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
+        return
+    if data == "admin_template_center":
+        builtins = get_builtin_templates()
+        rows = db_query("SELECT * FROM ops_templates ORDER BY created_at DESC LIMIT 8")
+        kb = [
+            [InlineKeyboardButton("⚡ 严格风控模板", callback_data="tpl_apply_tpl_strict"), InlineKeyboardButton("⚖️ 稳定运营模板", callback_data="tpl_apply_tpl_stable")],
+            [InlineKeyboardButton("📈 增长推广模板", callback_data="tpl_apply_tpl_growth")],
+            [InlineKeyboardButton("💾 保存当前为自定义模板", callback_data="tpl_save_current")],
+        ]
+        for r in rows:
+            it = dict(r)
+            kb.append([InlineKeyboardButton(f"📌 应用自定义模板 #{it['id']} {it['name']}", callback_data=f"tpl_apply_saved_{it['id']}")])
+        kb.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
+        msg = "🧩 **模板中心**\n可将多个运营设置打包为流程模板，一键应用。"
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
+        return
+    if data == "tpl_save_current":
+        payload = {
+            'settings': {
+                'risk_enforce_mode': get_setting_value('risk_enforce_mode', 'enforce'),
+                'risk_low_score': get_setting_value('risk_low_score', '80'),
+                'risk_high_score': get_setting_value('risk_high_score', '130'),
+                'anomaly_interval': get_setting_value('anomaly_interval', '1'),
+            }
+        }
+        save_ops_template('当前运营配置', payload, query.from_user.id)
+        await query.answer("✅ 已保存模板", show_alert=True)
+        return
+    if data.startswith("tpl_apply_"):
+        key = data.replace("tpl_apply_", "")
+        if key.startswith('saved_'):
+            sid = key.replace('saved_', '')
+            row = db_query("SELECT * FROM ops_templates WHERE id=?", (sid,), one=True)
+            if not row:
+                await query.answer("模板不存在", show_alert=True)
+                return
+            payload = json.loads(dict(row).get('payload_json') or '{}')
+            apply_template_payload(payload, actor=query.from_user.id)
+            await query.answer("✅ 已应用自定义模板", show_alert=True)
+            return
+        builtins = get_builtin_templates()
+        tpl = builtins.get(key)
+        if not tpl:
+            await query.answer("模板不存在", show_alert=True)
+            return
+        apply_template_payload(tpl, actor=query.from_user.id)
+        await query.answer("✅ 模板已应用", show_alert=True)
+        return
+    if data == "admin_bulk_jobs":
+        rows = db_query("SELECT * FROM bulk_jobs ORDER BY created_at DESC LIMIT 20")
+        lines = ["🗂 **批量任务队列（最近20条）**"]
+        if not rows:
+            lines.append("暂无任务")
+        for r in rows:
+            it = dict(r)
+            ts = datetime.datetime.fromtimestamp(int(it['created_at'])).strftime('%m-%d %H:%M')
+            lines.append(f"- #{it['id']} | {it['action']} | {it['status']} | {ts}")
+        await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         return
     if data == "admin_pay_settings":
         ali = '已配置' if get_setting_value('alipay_qr_file_id') else '未配置'
@@ -966,6 +1063,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"低风险阈值: {low}\n"
             f"高风险阈值: {high}\n"
             f"自动解封时长(小时): {unfreeze_hours}\n"
+            f"执行模式: {get_setting_value('risk_enforce_mode', 'enforce')}\n"
             f"观察名单(预览): {watch_preview}\n\n"
             "请通过下方按钮进入修改流程。"
         )
@@ -973,6 +1071,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton("✍️ 修改阈值", callback_data="admin_risk_policy_edit")],
             [InlineKeyboardButton("⏱ 设置自动解封时长", callback_data="admin_risk_unfreeze_edit")],
             [InlineKeyboardButton("👀 查看观察名单", callback_data="admin_risk_watchlist")],
+            [InlineKeyboardButton("🧪 切换灰度模式", callback_data="admin_risk_mode_cycle")],
             [InlineKeyboardButton("🔙 返回", callback_data="back_home")],
         ]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
@@ -1001,6 +1100,14 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         append_ops_timeline('风控', '清空观察名单', '管理员手动清空', actor=query.from_user.id)
         await query.answer("✅ 已清空", show_alert=True)
         await send_or_edit_menu(update, context, "✅ 观察名单已清空。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_risk_policy")]]))
+        return
+    if data == "admin_risk_mode_cycle":
+        curr = get_setting_value('risk_enforce_mode', 'enforce')
+        nxt = {'enforce': 'gray', 'gray': 'observe', 'observe': 'enforce'}.get(curr, 'enforce')
+        set_setting_value('risk_enforce_mode', nxt)
+        append_ops_timeline('风控', '切换执行模式', f'{curr}->{nxt}', actor=query.from_user.id)
+        await query.answer(f"已切换: {nxt}", show_alert=True)
+        await send_or_edit_menu(update, context, f"✅ 风控执行模式已切换为 {nxt}", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_risk_policy")]]))
         return
     if data == "admin_risk_audit":
         rows = db_query("SELECT * FROM anomaly_events ORDER BY created_at DESC LIMIT 20")
@@ -1571,6 +1678,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👤 用户ID: `{user_id}`\n"
                 f"📦 套餐: `{escape_markdown_v2(dict(plan)['name'])}`\n"
                 f"💳 支付方式: `{escape_markdown_v2(pay_label)}`\n"
+                f"🏷 渠道码: `{escape_markdown_v2(str(pending_order.get('channel_code') or '-'))}`\n"
                 f"📝 口令/说明: `{escaped_text}`"
             )
             admin_message = await context.bot.send_message(
@@ -1585,6 +1693,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👤 用户ID: {user_id}\n"
                 f"📦 套餐: {dict(plan)['name']}\n"
                 f"💳 支付方式: {pay_label}\n"
+                f"🏷 渠道码: {pending_order.get('channel_code') or '-'}\n"
                 f"📎 用户已提交支付凭证图片/文件"
             )
             admin_message = await context.bot.send_message(ADMIN_ID, admin_msg, reply_markup=InlineKeyboardMarkup(kb))
@@ -1806,6 +1915,24 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         append_order_audit_log(db_execute, order_id, 'deliver_failed', query.from_user.id, detail)
         await query.edit_message_text(f"❌ 错误: {exc}", reply_markup=admin_return_btn)
 
+async def process_bulk_jobs_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        rows = db_query("SELECT * FROM bulk_jobs WHERE status='pending' ORDER BY created_at ASC LIMIT 1")
+        if not rows:
+            return
+        job = dict(rows[0])
+        db_execute("UPDATE bulk_jobs SET status='running', updated_at=? WHERE id=?", (int(time.time()), job['id']))
+        payload = json.loads(job.get('payload_json') or '{}')
+        uuids = payload.get('uuids') or []
+        extra = payload.get('extra') or {}
+        ok, fail = await run_bulk_action(safe_api_request, job['action'], uuids, extra_fields=extra)
+        result = {'ok': ok, 'fail': fail}
+        status = 'done' if fail == 0 else 'partial'
+        db_execute("UPDATE bulk_jobs SET status=?, result_json=?, updated_at=? WHERE id=?", (status, json.dumps(result, ensure_ascii=False), int(time.time()), job['id']))
+        append_ops_timeline('批量', '批量任务完成', f"job={job['id']},action={job['action']},ok={ok},fail={fail}", actor='系统')
+    except Exception as exc:
+        logger.exception('process_bulk_jobs_job failed: %s', exc)
+
 async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
     try: 
         val = db_query("SELECT value FROM settings WHERE key='notify_days'", one=True)
@@ -1929,6 +2056,7 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
 
         low_score = int(get_setting_value('risk_low_score', '80'))
         high_score = int(get_setting_value('risk_high_score', '130'))
+        enforce_mode = get_setting_value('risk_enforce_mode', 'enforce')
         watchlist = get_risk_watchlist()
         unfreeze_candidates = get_json_setting('risk_unfreeze_candidates', {})
         if not isinstance(unfreeze_candidates, dict):
@@ -1939,14 +2067,26 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
             score = int(item.get('score', 0))
             if score >= high_score:
                 risk_level = '高'
-                action_taken = '禁用'
-                await safe_api_request('POST', f"/users/{uid}/actions/disable")
-                unfreeze_candidates.pop(uid, None)
+                if enforce_mode == 'enforce':
+                    action_taken = '禁用'
+                    await safe_api_request('POST', f"/users/{uid}/actions/disable")
+                    unfreeze_candidates.pop(uid, None)
+                elif enforce_mode == 'gray':
+                    action_taken = '限速(灰度)'
+                    await safe_api_request('PATCH', '/users', json_data={"uuid": uid, "status": "LIMITED"})
+                    unfreeze_candidates[uid] = int(time.time())
+                else:
+                    action_taken = '仅告警(观察)'
+                    watchlist.add(uid)
             elif score >= low_score:
                 risk_level = '中'
-                action_taken = '限速'
-                await safe_api_request('PATCH', '/users', json_data={"uuid": uid, "status": "LIMITED"})
-                unfreeze_candidates[uid] = int(time.time())
+                if enforce_mode == 'enforce':
+                    action_taken = '限速'
+                    await safe_api_request('PATCH', '/users', json_data={"uuid": uid, "status": "LIMITED"})
+                    unfreeze_candidates[uid] = int(time.time())
+                else:
+                    action_taken = '仅告警(灰度/观察)'
+                    watchlist.add(uid)
             else:
                 risk_level = '低'
                 action_taken = '告警'
@@ -2038,7 +2178,7 @@ if __name__ == '__main__':
     except Exception as exc:
         logger.warning("Failed to reschedule anomaly job at startup: %s", exc)
 
-    print(f"🚀 RemnaShop-Pro V2.8 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V2.9 已启动 | 监听中...")
     try:
         app.run_polling()
     finally:

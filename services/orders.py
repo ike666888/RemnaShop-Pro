@@ -33,7 +33,7 @@ def classify_order_failure(error_text: str) -> str:
     return "unknown"
 
 
-def create_order(db_query, db_execute, tg_id, plan_key, order_type, target_uuid, menu_message_id=None):
+def create_order(db_query, db_execute, tg_id, plan_key, order_type, target_uuid, menu_message_id=None, channel_code=None):
     existing = db_query(
         "SELECT * FROM orders WHERE tg_id=? AND status=? ORDER BY created_at DESC LIMIT 1",
         (tg_id, STATUS_PENDING),
@@ -47,9 +47,9 @@ def create_order(db_query, db_execute, tg_id, plan_key, order_type, target_uuid,
     order_id = uuid.uuid4().hex[:12]
     db_execute(
         """INSERT INTO orders
-        (order_id, tg_id, plan_key, order_type, target_uuid, status, menu_message_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (order_id, tg_id, plan_key, order_type, target_uuid, STATUS_PENDING, menu_message_id, now, now),
+        (order_id, tg_id, plan_key, order_type, target_uuid, status, menu_message_id, channel_code, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (order_id, tg_id, plan_key, order_type, target_uuid, STATUS_PENDING, menu_message_id, channel_code, now, now),
     )
     created = db_query("SELECT * FROM orders WHERE order_id=?", (order_id,), one=True)
     logger.info("created order order_id=%s tg_id=%s type=%s", order_id, tg_id, order_type)
