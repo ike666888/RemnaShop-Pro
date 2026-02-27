@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Any, Optional
 
 import httpx
 
@@ -34,27 +35,40 @@ async def close_all_clients() -> None:
     _CLIENTS.clear()
 
 
-async def safe_api_request(method, endpoint, panel_url, headers, verify_tls=True, json_data=None):
+
+
+def _calc_retry_delay(resp: Optional[httpx.Response], attempt: int, base: float = 0.6) -> float:
+    if resp is not None and resp.status_code == 429:
+        retry_after = resp.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return max(float(retry_after), 0.0)
+            except ValueError:
+                pass
+    return base * attempt
+
+
+def _build_request_kwargs(json_data: Optional[dict[str, Any]] = None, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    if json_data is not None:
+        kwargs["json"] = json_data
+    if params is not None:
+        kwargs["params"] = params
+    return kwargs
+
+async def safe_api_request(method, endpoint, panel_url, headers, verify_tls=True, json_data=None, params=None):
     url = f"{panel_url}{endpoint}"
     client = _get_client(verify_tls)
     max_attempts = 3
-    backoff_seconds = 0.6
 
     for attempt in range(1, max_attempts + 1):
+        resp = None
         try:
-            if method == 'GET':
-                resp = await client.get(url, headers=headers)
-            elif method == 'POST':
-                resp = await client.post(url, json=json_data, headers=headers)
-            elif method == 'PATCH':
-                resp = await client.patch(url, json=json_data, headers=headers)
-            elif method == 'DELETE':
-                resp = await client.delete(url, headers=headers)
-            else:
-                raise ValueError(f"Unsupported method: {method}")
+            req_kwargs = _build_request_kwargs(json_data=json_data, params=params)
+            resp = await client.request(method.upper(), url, headers=headers, **req_kwargs)
 
             if resp.status_code in _RETRYABLE_STATUS_CODES and attempt < max_attempts:
-                await asyncio.sleep(backoff_seconds * attempt)
+                await asyncio.sleep(_calc_retry_delay(resp, attempt))
                 continue
 
             if resp.status_code >= 400:
@@ -68,7 +82,7 @@ async def safe_api_request(method, endpoint, panel_url, headers, verify_tls=True
             return resp
         except httpx.HTTPError as exc:
             if attempt < max_attempts:
-                await asyncio.sleep(backoff_seconds * attempt)
+                await asyncio.sleep(_calc_retry_delay(resp, attempt))
                 continue
             logger.error("API HTTP Error [%s %s]: %s", method, endpoint, exc)
             return None
