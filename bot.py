@@ -145,6 +145,67 @@ def set_setting_value(key, value):
     db_execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
 
 
+def get_json_setting(key, default):
+    raw = get_setting_value(key)
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
+def set_json_setting(key, value):
+    set_setting_value(key, json.dumps(value, ensure_ascii=False))
+
+
+def append_ops_timeline(event_type, title, detail, actor='系统', target='-'):
+    rows = get_json_setting('ops_timeline', [])
+    if not isinstance(rows, list):
+        rows = []
+    rows.append({
+        'ts': int(time.time()),
+        'type': event_type,
+        'title': title,
+        'detail': detail[:240],
+        'actor': str(actor),
+        'target': str(target),
+    })
+    set_json_setting('ops_timeline', rows[-120:])
+
+
+def push_subscription_settings_snapshot(payload, source='手动变更前快照'):
+    hist = get_json_setting('subscription_settings_history', [])
+    if not isinstance(hist, list):
+        hist = []
+    hist.append({
+        'ts': int(time.time()),
+        'source': source,
+        'payload': payload,
+    })
+    set_json_setting('subscription_settings_history', hist[-10:])
+
+
+def pop_subscription_settings_snapshot():
+    hist = get_json_setting('subscription_settings_history', [])
+    if not isinstance(hist, list) or not hist:
+        return None
+    item = hist.pop()
+    set_json_setting('subscription_settings_history', hist)
+    return item
+
+
+def get_risk_watchlist():
+    items = get_json_setting('risk_watchlist', [])
+    if not isinstance(items, list):
+        return set()
+    return {str(x) for x in items if x}
+
+
+def set_risk_watchlist(items):
+    set_json_setting('risk_watchlist', sorted({str(x) for x in items if x}))
+
+
 init_db()
 
 
@@ -195,6 +256,72 @@ async def bulk_move_users_to_squad(uuids, squad_uuid):
     return await api_bulk_move_users_to_squad(uuids, squad_uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
 
+async def build_squad_capacity_summary(max_users=60):
+    rows = db_query("SELECT DISTINCT uuid FROM subscriptions ORDER BY id DESC LIMIT ?", (max_users,))
+    uuids = [dict(r)['uuid'] for r in rows]
+    if not uuids:
+        return "暂无订阅样本", None
+    infos = await asyncio.gather(*[get_panel_user(u) for u in uuids])
+    counts = defaultdict(int)
+    for info in infos:
+        if not isinstance(info, dict):
+            continue
+        squad = info.get('externalSquadUuid')
+        if not squad:
+            squads = info.get('activeInternalSquads') or []
+            if isinstance(squads, list) and squads:
+                first = squads[0]
+                if isinstance(first, dict):
+                    squad = first.get('uuid') or first.get('externalSquadUuid')
+                else:
+                    squad = str(first)
+        counts[squad or '未分组'] += 1
+    top = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+    lines = [f"样本用户数: {len(uuids)}"]
+    for sid, cnt in top[:5]:
+        lines.append(f"- `{sid}`：{cnt}")
+    suggestion = None
+    if len(top) >= 2 and top[0][1] - top[-1][1] >= max(5, len(uuids) // 5):
+        suggestion = {'from': top[0][0], 'to': top[-1][0], 'count': min(10, (top[0][1]-top[-1][1])//2)}
+        lines.append(f"\n建议迁移：从 `{suggestion['from']}` 向 `{suggestion['to']}` 迁移约 {suggestion['count']} 人")
+    return "\n".join(lines), suggestion
+
+
+async def build_top_users_traffic(max_users=50):
+    rows = db_query("SELECT tg_id, uuid FROM subscriptions ORDER BY id DESC LIMIT ?", (max_users,))
+    if not rows:
+        return []
+    pairs = [(dict(r)['tg_id'], dict(r)['uuid']) for r in rows]
+    infos = await asyncio.gather(*[get_panel_user(u) for _, u in pairs])
+    data = []
+    for (tg_id, uid), info in zip(pairs, infos):
+        if not isinstance(info, dict):
+            continue
+        used = int((info.get('userTraffic') or {}).get('usedTrafficBytes', 0) or 0)
+        data.append((tg_id, uid, used))
+    return sorted(data, key=lambda x: x[2], reverse=True)[:5]
+
+
+def detect_bandwidth_volatility(nodes_rt):
+    prev = get_json_setting('bandwidth_last_nodes', {})
+    if not isinstance(prev, dict):
+        prev = {}
+    alerts = []
+    curr = {}
+    for it in nodes_rt:
+        name = it.get('name') or it.get('nodeName') or '未知节点'
+        val = int(it.get('totalTrafficBytes') or it.get('trafficBytes') or 0)
+        curr[name] = val
+        old = int(prev.get(name, 0) or 0)
+        if old > 0:
+            delta = val - old
+            ratio = abs(delta) / old
+            if abs(delta) >= 1024**3 and ratio >= 0.5:
+                alerts.append((name, delta, ratio))
+    set_json_setting('bandwidth_last_nodes', curr)
+    return alerts
+
+
 async def send_or_edit_menu(update, context, text, reply_markup):
     if update.callback_query:
         try:
@@ -242,7 +369,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🧾 订单审计", callback_data="admin_orders_menu"), InlineKeyboardButton("🧾 风控回溯", callback_data="admin_risk_audit")],
             [InlineKeyboardButton("⚙️ 订阅设置", callback_data="admin_subscription_settings"), InlineKeyboardButton("🧩 用户分组", callback_data="admin_squads_menu")],
             [InlineKeyboardButton("📈 带宽看板", callback_data="admin_bandwidth_dashboard"), InlineKeyboardButton("🛡️ 风控策略", callback_data="admin_risk_policy")],
-            [InlineKeyboardButton("💳 收款设置", callback_data="admin_pay_settings"), InlineKeyboardButton("📢 群发通知", callback_data="admin_broadcast_start")]
+            [InlineKeyboardButton("🕒 操作时间线", callback_data="admin_ops_timeline"), InlineKeyboardButton("📢 群发通知", callback_data="admin_broadcast_start")],
+            [InlineKeyboardButton("💳 收款设置", callback_data="admin_pay_settings")]
         ]
     else:
         msg_text = "👋 **欢迎使用自助服务！**\n请选择操作："
@@ -610,16 +738,59 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if data == "admin_subscription_settings":
         settings_payload = await get_subscription_settings()
         preview = json.dumps(settings_payload, ensure_ascii=False, indent=2)[:1200] if settings_payload else '{}'
+        history = get_json_setting('subscription_settings_history', [])
+        latest_ts = history[-1]['ts'] if isinstance(history, list) and history else None
+        latest_text = datetime.datetime.fromtimestamp(latest_ts).strftime('%m-%d %H:%M') if latest_ts else '暂无'
         msg = (
             "⚙️ **订阅设置（可视化）**\n"
             "当前配置（截断显示）：\n"
             "```json\n"
             f"{preview}\n"
             "```\n\n"
-            "如需更新，请点击下方按钮并发送 JSON。"
+            f"最近回滚点：`{latest_text}`\n"
+            "可使用模板快速应用，或直接发送 JSON 更新。"
         )
-        kb = [[InlineKeyboardButton("✍️ 修改订阅设置(JSON)", callback_data="admin_subscription_settings_edit")], [InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
+        kb = [
+            [InlineKeyboardButton("✍️ 修改订阅设置(JSON)", callback_data="admin_subscription_settings_edit")],
+            [InlineKeyboardButton("🧩 应用安全模板", callback_data="admin_subsettings_tpl_safe"), InlineKeyboardButton("🧩 应用兼容模板", callback_data="admin_subsettings_tpl_compat")],
+            [InlineKeyboardButton("💾 保存回滚点", callback_data="admin_subsettings_snapshot"), InlineKeyboardButton("↩️ 回滚最近一次", callback_data="admin_subsettings_rollback")],
+            [InlineKeyboardButton("🔙 返回", callback_data="back_home")],
+        ]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
+        return
+    if data == "admin_subsettings_snapshot":
+        payload = await get_subscription_settings()
+        push_subscription_settings_snapshot(payload, source='手动保存')
+        append_ops_timeline('配置', '订阅设置保存回滚点', '管理员保存当前订阅设置快照', actor=query.from_user.id)
+        await query.answer("✅ 已保存回滚点", show_alert=True)
+        await send_or_edit_menu(update, context, "✅ 已保存当前订阅设置为回滚点。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_subscription_settings")]]))
+        return
+    if data in {"admin_subsettings_tpl_safe", "admin_subsettings_tpl_compat"}:
+        current = await get_subscription_settings()
+        push_subscription_settings_snapshot(current, source='模板应用前自动备份')
+        payload = {'allowInsecure': False} if data.endswith('safe') else {'allowInsecure': True}
+        resp = await patch_subscription_settings(payload)
+        if resp and resp.status_code in (200, 204):
+            tpl = '安全模板' if data.endswith('safe') else '兼容模板'
+            append_ops_timeline('配置', f'应用{tpl}', f'payload={json.dumps(payload, ensure_ascii=False)}', actor=query.from_user.id)
+            await query.answer("✅ 模板应用成功", show_alert=True)
+            await send_or_edit_menu(update, context, f"✅ 已应用{tpl}。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_subscription_settings")]]))
+        else:
+            await query.answer("❌ 模板应用失败", show_alert=True)
+        return
+    if data == "admin_subsettings_rollback":
+        snap = pop_subscription_settings_snapshot()
+        if not snap:
+            await query.answer("⚠️ 暂无可回滚快照", show_alert=True)
+            return
+        payload = snap.get('payload') or {}
+        resp = await patch_subscription_settings(payload)
+        if resp and resp.status_code in (200, 204):
+            append_ops_timeline('配置', '订阅设置回滚', f"来源={snap.get('source', '-')}", actor=query.from_user.id)
+            await query.answer("✅ 回滚成功", show_alert=True)
+            await send_or_edit_menu(update, context, "✅ 已按最近回滚点恢复设置。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_subscription_settings")]]))
+        else:
+            await query.answer("❌ 回滚失败", show_alert=True)
         return
     if data == "admin_subscription_settings_edit":
         context.user_data['edit_subscription_settings'] = True
@@ -627,14 +798,49 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     if data == "admin_squads_menu":
         squads = await get_internal_squads()
+        summary, suggestion = await build_squad_capacity_summary()
         kb = []
         for s in squads[:20]:
             suuid = s.get('uuid') or ''
             sname = s.get('name') or suuid[:8]
             kb.append([InlineKeyboardButton(f"🧩 {sname}", callback_data=f"admin_squad_{suuid}")])
+        if suggestion and suggestion['from'] != '未分组' and suggestion['to'] != '未分组':
+            kb.append([InlineKeyboardButton("🚚 一键迁移建议", callback_data=f"admin_squad_suggest_{suggestion['from']}__{suggestion['to']}__{suggestion['count']}")])
         kb.append([InlineKeyboardButton("🚚 批量迁移到分组", callback_data="admin_squad_bulk_move")])
         kb.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
-        await send_or_edit_menu(update, context, "🧩 **用户分组（内部组）**", InlineKeyboardMarkup(kb))
+        await send_or_edit_menu(update, context, f"🧩 **用户分组（内部组）**\n{summary}", InlineKeyboardMarkup(kb))
+        return
+    if data.startswith("admin_squad_suggest_"):
+        parts = data.replace("admin_squad_suggest_", "").split("__")
+        if len(parts) != 3:
+            await query.answer("建议参数错误", show_alert=True)
+            return
+        from_squad, to_squad, cnt_text = parts
+        try:
+            move_n = max(1, min(int(cnt_text), 20))
+        except ValueError:
+            move_n = 5
+        rows = db_query("SELECT uuid FROM subscriptions ORDER BY id DESC LIMIT 120")
+        pool = [dict(r)['uuid'] for r in rows]
+        infos = await asyncio.gather(*[get_panel_user(u) for u in pool])
+        candidates = []
+        for uid, info in zip(pool, infos):
+            if not isinstance(info, dict):
+                continue
+            squad = info.get('externalSquadUuid')
+            if squad == from_squad:
+                candidates.append(uid)
+            if len(candidates) >= move_n:
+                break
+        if not candidates:
+            await query.answer("暂无可迁移候选用户", show_alert=True)
+            return
+        resp = await bulk_move_users_to_squad(candidates, to_squad)
+        if resp and resp.status_code in (200, 201, 204):
+            append_ops_timeline('分组', '执行迁移建议', f'from={from_squad},to={to_squad},count={len(candidates)}', actor=query.from_user.id)
+            await query.answer(f"✅ 已迁移 {len(candidates)} 人", show_alert=True)
+        else:
+            await query.answer("❌ 迁移失败", show_alert=True)
         return
     if data == "admin_squad_bulk_move":
         context.user_data['squad_bulk_move'] = True
@@ -665,6 +871,20 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             lines.append("- 暂无数据")
         for name, val in top:
             lines.append(f"- {name}: {round(val / 1024**3, 2)} GB")
+        top_users = await build_top_users_traffic()
+        lines.append("\nTOP用户流量：")
+        if not top_users:
+            lines.append("- 暂无")
+        for tg_id, uid, used in top_users:
+            lines.append(f"- 用户`{tg_id}` / `{uid[:8]}`: {round(used / 1024**3, 2)} GB")
+        alerts = detect_bandwidth_volatility(nodes_rt)
+        lines.append("\n节点波动提醒：")
+        if not alerts:
+            lines.append("- 暂无明显波动")
+        else:
+            for name, delta, ratio in alerts[:5]:
+                symbol = '⬆️' if delta > 0 else '⬇️'
+                lines.append(f"- {symbol} {name}: {round(delta / 1024**3, 2)} GB ({round(ratio*100, 1)}%)")
         stats = await get_subscription_history_stats()
         hourly = stats.get('hourlyRequestStats') if isinstance(stats, dict) else []
         recent = int(hourly[-1].get('requestCount', 0)) if hourly else 0
@@ -674,14 +894,49 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if data == "admin_risk_policy":
         low = get_setting_value('risk_low_score', '80')
         high = get_setting_value('risk_high_score', '130')
+        unfreeze_hours = get_setting_value('risk_auto_unfreeze_hours', '12')
+        watchlist = sorted(list(get_risk_watchlist()))[:8]
+        watch_preview = '、'.join(x[:8] for x in watchlist) if watchlist else '暂无'
         msg = (
             "🛡️ **风控策略（多级）**\n"
             f"低风险阈值: {low}\n"
-            f"高风险阈值: {high}\n\n"
-            "请发送：低阈值,高阈值（例如 80,130）"
+            f"高风险阈值: {high}\n"
+            f"自动解封时长(小时): {unfreeze_hours}\n"
+            f"观察名单(预览): {watch_preview}\n\n"
+            "请通过下方按钮进入修改流程。"
         )
+        kb = [
+            [InlineKeyboardButton("✍️ 修改阈值", callback_data="admin_risk_policy_edit")],
+            [InlineKeyboardButton("⏱ 设置自动解封时长", callback_data="admin_risk_unfreeze_edit")],
+            [InlineKeyboardButton("👀 查看观察名单", callback_data="admin_risk_watchlist")],
+            [InlineKeyboardButton("🔙 返回", callback_data="back_home")],
+        ]
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
+        return
+    if data == "admin_risk_policy_edit":
         context.user_data['edit_risk_policy'] = True
-        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="back_home")]]))
+        await send_or_edit_menu(update, context, "✍️ 请发送：低阈值,高阈值（例如 80,130）", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_risk_policy")]]))
+        return
+    if data == "admin_risk_unfreeze_edit":
+        context.user_data['edit_risk_unfreeze_hours'] = True
+        await send_or_edit_menu(update, context, "⏱ 请输入自动解封时长（小时，整数，例如 12）", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_risk_policy")]]))
+        return
+    if data == "admin_risk_watchlist":
+        watchlist = sorted(list(get_risk_watchlist()))
+        lines = ["👀 **观察名单**"]
+        if not watchlist:
+            lines.append("暂无记录")
+        else:
+            for uid in watchlist[:30]:
+                lines.append(f"- `{uid}`")
+        kb = [[InlineKeyboardButton("🧹 清空观察名单", callback_data="admin_risk_watchlist_clear")], [InlineKeyboardButton("🔙 返回", callback_data="admin_risk_policy")]]
+        await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup(kb))
+        return
+    if data == "admin_risk_watchlist_clear":
+        set_risk_watchlist(set())
+        append_ops_timeline('风控', '清空观察名单', '管理员手动清空', actor=query.from_user.id)
+        await query.answer("✅ 已清空", show_alert=True)
+        await send_or_edit_menu(update, context, "✅ 观察名单已清空。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_risk_policy")]]))
         return
     if data == "admin_risk_audit":
         rows = db_query("SELECT * FROM anomaly_events ORDER BY created_at DESC LIMIT 20")
@@ -692,6 +947,27 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             it = dict(r)
             ts = datetime.datetime.fromtimestamp(int(it['created_at'])).strftime('%m-%d %H:%M')
             lines.append(f"- {ts} | {it['risk_level']} | {it['user_uuid'][:8]} | 分数{it['risk_score']} | 动作:{it['action_taken']}")
+        await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+        return
+    if data == "admin_ops_timeline":
+        lines = ["🕒 **操作时间线（订单+风控+配置）**"]
+        events = []
+        order_logs = db_query("SELECT order_id, action, actor_id, detail, created_at FROM order_audit_logs ORDER BY created_at DESC LIMIT 15")
+        for r in order_logs:
+            it = dict(r)
+            events.append((int(it['created_at']), f"订单 | {it['action']} | {it['order_id']} | {it.get('detail') or '-'}"))
+        risk_logs = db_query("SELECT user_uuid, risk_level, risk_score, action_taken, created_at FROM anomaly_events ORDER BY created_at DESC LIMIT 15")
+        for r in risk_logs:
+            it = dict(r)
+            events.append((int(it['created_at']), f"风控 | {it['risk_level']} | {it['user_uuid'][:8]} | {it['action_taken']}"))
+        for item in get_json_setting('ops_timeline', [])[-20:]:
+            events.append((int(item.get('ts', 0)), f"{item.get('type','系统')} | {item.get('title','-')} | {item.get('detail','-')}"))
+        events.sort(key=lambda x: x[0], reverse=True)
+        if not events:
+            lines.append('暂无记录')
+        for ts, text_line in events[:25]:
+            ts_text = datetime.datetime.fromtimestamp(ts).strftime('%m-%d %H:%M') if ts else '--'
+            lines.append(f"- {ts_text} | {text_line[:120]}")
         await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         return
     if data == "admin_bulk_menu":
@@ -917,7 +1193,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"🔢 封禁阈值：单周期 > {threshold} 个IP\n"
             f"📊 最近1小时请求量：`{hourly_last}`\n"
             f"📱 TOP客户端：`{app_top}`\n\n"
-            "检测到异常会自动禁用账号并通知您。"
+            "检测支持多级处置：低风险告警入观察名单，中风险限速，高风险禁用。"
         )
         kb = [[InlineKeyboardButton("⏱️ 设置周期", callback_data="set_anomaly_interval"), InlineKeyboardButton("🔢 设置阈值", callback_data="set_anomaly_threshold")],[InlineKeyboardButton("📋 白名单", callback_data="anomaly_whitelist_menu"), InlineKeyboardButton("🛡️ 风控策略", callback_data="admin_risk_policy")],[InlineKeyboardButton("🧾 风控回溯", callback_data="admin_risk_audit")],[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
@@ -993,9 +1269,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             payload = json.loads(text)
             if not isinstance(payload, dict):
                 raise ValueError('必须是JSON对象')
+            current = await get_subscription_settings()
+            push_subscription_settings_snapshot(current, source='手工JSON变更前自动备份')
             resp = await patch_subscription_settings(payload)
             context.user_data.pop('edit_subscription_settings', None)
             if resp and resp.status_code in (200, 204):
+                append_ops_timeline('配置', '手动更新订阅设置', json.dumps(payload, ensure_ascii=False)[:180], actor=user_id)
                 await update.message.reply_text("✅ 订阅设置已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_subscription_settings")]]))
             else:
                 await update.message.reply_text("❌ 更新失败，请检查字段", reply_markup=cancel_kb)
@@ -1033,6 +1312,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_setting_value('risk_high_score', high)
             context.user_data.pop('edit_risk_policy', None)
             await update.message.reply_text(f"✅ 风控策略已更新：低={low} 高={high}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_anomaly_menu")]]))
+        except Exception as exc:
+            await update.message.reply_text(f"❌ 参数错误: {exc}", reply_markup=cancel_kb)
+        return
+    if user_id == ADMIN_ID and context.user_data.get('edit_risk_unfreeze_hours') and text:
+        try:
+            val = int(text.strip())
+            if val <= 0:
+                raise ValueError('必须大于0')
+            set_setting_value('risk_auto_unfreeze_hours', val)
+            context.user_data.pop('edit_risk_unfreeze_hours', None)
+            append_ops_timeline('风控', '修改自动解封时长', f'hours={val}', actor=user_id)
+            await update.message.reply_text(f"✅ 自动解封时长已更新为 {val} 小时", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_risk_policy")]]))
         except Exception as exc:
             await update.message.reply_text(f"❌ 参数错误: {exc}", reply_markup=cancel_kb)
         return
@@ -1490,6 +1781,26 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
     try:
+        # 自动解封（中风险限速后，低风险持续一段时间自动恢复）
+        auto_hours = int(get_setting_value('risk_auto_unfreeze_hours', '12') or '12')
+        candidates = get_json_setting('risk_unfreeze_candidates', {})
+        if isinstance(candidates, dict) and candidates:
+            now_ts = int(time.time())
+            changed = False
+            for uid, ts in list(candidates.items()):
+                try:
+                    added_ts = int(ts)
+                except Exception:
+                    added_ts = now_ts
+                if now_ts - added_ts >= auto_hours * 3600:
+                    resp = await safe_api_request('PATCH', '/users', json_data={"uuid": uid, "status": "ACTIVE"})
+                    if resp and resp.status_code in (200, 201, 204):
+                        changed = True
+                        candidates.pop(uid, None)
+                        append_ops_timeline('风控', '自动解封', f'uid={uid},after={auto_hours}h', actor='系统', target=uid)
+            if changed:
+                set_json_setting('risk_unfreeze_candidates', candidates)
+
         val_thr = db_query("SELECT value FROM settings WHERE key='anomaly_threshold'", one=True)
         limit = int(val_thr['value']) if val_thr else 50
         resp = await safe_api_request('GET', '/subscription-request-history')
@@ -1533,6 +1844,10 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
 
         low_score = int(get_setting_value('risk_low_score', '80'))
         high_score = int(get_setting_value('risk_high_score', '130'))
+        watchlist = get_risk_watchlist()
+        unfreeze_candidates = get_json_setting('risk_unfreeze_candidates', {})
+        if not isinstance(unfreeze_candidates, dict):
+            unfreeze_candidates = {}
 
         for item in incidents:
             uid = item['uid']
@@ -1541,19 +1856,23 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
                 risk_level = '高'
                 action_taken = '禁用'
                 await safe_api_request('POST', f"/users/{uid}/actions/disable")
+                unfreeze_candidates.pop(uid, None)
             elif score >= low_score:
                 risk_level = '中'
                 action_taken = '限速'
                 await safe_api_request('PATCH', '/users', json_data={"uuid": uid, "status": "LIMITED"})
+                unfreeze_candidates[uid] = int(time.time())
             else:
                 risk_level = '低'
                 action_taken = '告警'
+                watchlist.add(uid)
 
             evidence_summary = '; '.join(f"{e['ip']}@{e['ts']}" for e in item['evidence'][:3])
             db_execute(
                 "INSERT INTO anomaly_events (user_uuid, risk_level, risk_score, ip_count, ua_diversity, density, action_taken, evidence_summary, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (uid, risk_level, score, int(item['ip_count']), int(item['ua_diversity']), int(item['density']), action_taken, evidence_summary[:400], int(time.time())),
             )
+            append_ops_timeline('风控', '异常处置', f'uid={uid},level={risk_level},action={action_taken},score={score}', actor='系统', target=uid)
 
             try:
                 lines = [
@@ -1572,9 +1891,12 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
                     [InlineKeyboardButton("➕ 加入白名单", callback_data=f"anomaly_quick_whitelist_{uid}")],
                     [InlineKeyboardButton("✅ 尝试解封", callback_data=f"anomaly_quick_enable_{uid}")],
                 ])
-                await context.bot.send_message(ADMIN_ID, '\n'.join(lines), parse_mode='MarkdownV2', reply_markup=quick_kb)
+                await context.bot.send_message(ADMIN_ID, "\n".join(lines), parse_mode='MarkdownV2', reply_markup=quick_kb)
             except Exception as exc:
                 logger.warning("Failed to notify anomaly admin: %s", exc)
+
+        set_risk_watchlist(watchlist)
+        set_json_setting('risk_unfreeze_candidates', unfreeze_candidates)
 
         if max_seen_ts > last_scan_ts:
             db_execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('anomaly_last_scan_ts', ?)", (str(max_seen_ts),))
@@ -1630,7 +1952,7 @@ if __name__ == '__main__':
     except Exception as exc:
         logger.warning("Failed to reschedule anomaly job at startup: %s", exc)
 
-    print(f"🚀 RemnaShop-Pro V2.6 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V2.7 已启动 | 监听中...")
     try:
         app.run_polling()
     finally:
