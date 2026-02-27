@@ -108,7 +108,6 @@ journalctl -u remnashop -f
 
 # 重启服务
 systemctl restart remnashop
-systemctl status remnashop
 
 # 查看状态
 systemctl status remnashop
