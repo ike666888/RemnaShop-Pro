@@ -106,3 +106,44 @@ async def get_user_subscription_history(uuid, panel_url, headers, verify_tls=Tru
         payload = extract_payload(resp)
         return payload if isinstance(payload, dict) else {}
     return {}
+
+
+async def get_subscription_settings(panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', '/subscription-settings', panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+async def patch_subscription_settings(panel_url, headers, payload, verify_tls=True):
+    return await safe_api_request('PATCH', '/subscription-settings', panel_url, headers, verify_tls, json_data=payload)
+
+
+async def get_internal_squads(panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', '/internal-squads', panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, list) else []
+    return []
+
+
+async def get_internal_squad_accessible_nodes(uuid, panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', f'/internal-squads/{uuid}/accessible-nodes', panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, list) else []
+    return []
+
+
+async def get_bandwidth_nodes_realtime(panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', '/bandwidth-stats/nodes/realtime', panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, list) else []
+    return []
+
+
+async def bulk_move_users_to_squad(uuids, squad_uuid, panel_url, headers, verify_tls=True):
+    payload = {'uuids': uuids, 'fields': {'externalSquadUuid': squad_uuid}}
+    return await safe_api_request('POST', '/users/bulk/update', panel_url, headers, verify_tls, json_data=payload)

@@ -7,7 +7,7 @@ import asyncio
 import qrcode
 from io import BytesIO
 from collections import defaultdict
-from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, close_all_clients, extract_payload
+from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_realtime as api_get_bandwidth_nodes_realtime, bulk_move_users_to_squad as api_bulk_move_users_to_squad, close_all_clients, extract_payload
 from services.orders import (
     create_order,
     get_order,
@@ -171,6 +171,30 @@ async def get_user_subscription_history(uuid):
     return await api_get_user_subscription_history(uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
 
+async def get_subscription_settings():
+    return await api_get_subscription_settings(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def patch_subscription_settings(payload):
+    return await api_patch_subscription_settings(PANEL_URL, get_headers(), payload, PANEL_VERIFY_TLS)
+
+
+async def get_internal_squads():
+    return await api_get_internal_squads(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_internal_squad_accessible_nodes(uuid):
+    return await api_get_internal_squad_accessible_nodes(uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_bandwidth_nodes_realtime():
+    return await api_get_bandwidth_nodes_realtime(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def bulk_move_users_to_squad(uuids, squad_uuid):
+    return await api_bulk_move_users_to_squad(uuids, squad_uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
 async def send_or_edit_menu(update, context, text, reply_markup):
     if update.callback_query:
         try:
@@ -215,7 +239,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔔 提醒设置", callback_data="admin_notify"), InlineKeyboardButton("🗑 清理设置", callback_data="admin_cleanup")],
             [InlineKeyboardButton("🛡️ 异常设置", callback_data="admin_anomaly_menu")],
             [InlineKeyboardButton("📚 批量操作", callback_data="admin_bulk_menu")],
-            [InlineKeyboardButton("🧾 订单审计", callback_data="admin_orders_menu")],
+            [InlineKeyboardButton("🧾 订单审计", callback_data="admin_orders_menu"), InlineKeyboardButton("🧾 风控回溯", callback_data="admin_risk_audit")],
+            [InlineKeyboardButton("⚙️ 订阅设置", callback_data="admin_subscription_settings"), InlineKeyboardButton("🧩 用户分组", callback_data="admin_squads_menu")],
+            [InlineKeyboardButton("📈 带宽看板", callback_data="admin_bandwidth_dashboard"), InlineKeyboardButton("🛡️ 风控策略", callback_data="admin_risk_policy")],
             [InlineKeyboardButton("💳 收款设置", callback_data="admin_pay_settings"), InlineKeyboardButton("📢 群发通知", callback_data="admin_broadcast_start")]
         ]
     else:
@@ -581,6 +607,93 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['broadcast_mode'] = True
         await send_or_edit_menu(update, context, "📢 **群发通知模式**\n请发送要广播的内容（文字/图片/文件）。\n发送后将自动群发给所有用户。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="cancel_op")]]))
         return
+    if data == "admin_subscription_settings":
+        settings_payload = await get_subscription_settings()
+        preview = json.dumps(settings_payload, ensure_ascii=False, indent=2)[:1200] if settings_payload else '{}'
+        msg = (
+            "⚙️ **订阅设置（可视化）**\n"
+            "当前配置（截断显示）：\n"
+            "```json\n"
+            f"{preview}\n"
+            "```\n\n"
+            "如需更新，请点击下方按钮并发送 JSON。"
+        )
+        kb = [[InlineKeyboardButton("✍️ 修改订阅设置(JSON)", callback_data="admin_subscription_settings_edit")], [InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
+        return
+    if data == "admin_subscription_settings_edit":
+        context.user_data['edit_subscription_settings'] = True
+        await send_or_edit_menu(update, context, "✍️ 请发送要 PATCH 的 JSON 内容（例如 {\"allowInsecure\":false}）", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="cancel_op")]]))
+        return
+    if data == "admin_squads_menu":
+        squads = await get_internal_squads()
+        kb = []
+        for s in squads[:20]:
+            suuid = s.get('uuid') or ''
+            sname = s.get('name') or suuid[:8]
+            kb.append([InlineKeyboardButton(f"🧩 {sname}", callback_data=f"admin_squad_{suuid}")])
+        kb.append([InlineKeyboardButton("🚚 批量迁移到分组", callback_data="admin_squad_bulk_move")])
+        kb.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
+        await send_or_edit_menu(update, context, "🧩 **用户分组（内部组）**", InlineKeyboardMarkup(kb))
+        return
+    if data == "admin_squad_bulk_move":
+        context.user_data['squad_bulk_move'] = True
+        await send_or_edit_menu(update, context, "✍️ 请按以下格式发送：\n第一行：目标分组UUID\n后续行：用户UUID列表", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_squads_menu")]]))
+        return
+    if data.startswith("admin_squad_"):
+        squad_uuid = data.replace("admin_squad_", "")
+        nodes = await get_internal_squad_accessible_nodes(squad_uuid)
+        lines = ["🧩 **分组详情**", f"UUID: `{squad_uuid}`", "", "可访问节点："]
+        if not nodes:
+            lines.append("- 暂无")
+        else:
+            for n in nodes[:20]:
+                lines.append(f"- {n.get('name', '未知节点')}")
+        kb = [[InlineKeyboardButton("🔙 返回分组", callback_data="admin_squads_menu")]]
+        await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup(kb))
+        return
+    if data == "admin_bandwidth_dashboard":
+        nodes_rt = await get_bandwidth_nodes_realtime()
+        top = []
+        for it in nodes_rt[:5]:
+            name = it.get('name') or it.get('nodeName') or '未知节点'
+            val = it.get('totalTrafficBytes') or it.get('trafficBytes') or 0
+            top.append((name, int(val) if isinstance(val, (int, float)) else 0))
+        top.sort(key=lambda x: x[1], reverse=True)
+        lines = ["📈 **带宽看板（实时）**", "TOP节点："]
+        if not top:
+            lines.append("- 暂无数据")
+        for name, val in top:
+            lines.append(f"- {name}: {round(val / 1024**3, 2)} GB")
+        stats = await get_subscription_history_stats()
+        hourly = stats.get('hourlyRequestStats') if isinstance(stats, dict) else []
+        recent = int(hourly[-1].get('requestCount', 0)) if hourly else 0
+        lines.append(f"\n最近1小时请求数：`{recent}`")
+        await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+        return
+    if data == "admin_risk_policy":
+        low = get_setting_value('risk_low_score', '80')
+        high = get_setting_value('risk_high_score', '130')
+        msg = (
+            "🛡️ **风控策略（多级）**\n"
+            f"低风险阈值: {low}\n"
+            f"高风险阈值: {high}\n\n"
+            "请发送：低阈值,高阈值（例如 80,130）"
+        )
+        context.user_data['edit_risk_policy'] = True
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="back_home")]]))
+        return
+    if data == "admin_risk_audit":
+        rows = db_query("SELECT * FROM anomaly_events ORDER BY created_at DESC LIMIT 20")
+        lines = ["🧾 **风控回溯（最近20条）**"]
+        if not rows:
+            lines.append("暂无记录")
+        for r in rows:
+            it = dict(r)
+            ts = datetime.datetime.fromtimestamp(int(it['created_at'])).strftime('%m-%d %H:%M')
+            lines.append(f"- {ts} | {it['risk_level']} | {it['user_uuid'][:8]} | 分数{it['risk_score']} | 动作:{it['action_taken']}")
+        await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+        return
     if data == "admin_bulk_menu":
         msg = """📚 **批量用户操作**
 
@@ -806,7 +919,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"📱 TOP客户端：`{app_top}`\n\n"
             "检测到异常会自动禁用账号并通知您。"
         )
-        kb = [[InlineKeyboardButton("⏱️ 设置周期", callback_data="set_anomaly_interval"), InlineKeyboardButton("🔢 设置阈值", callback_data="set_anomaly_threshold")],[InlineKeyboardButton("📋 白名单", callback_data="anomaly_whitelist_menu")],[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
+        kb = [[InlineKeyboardButton("⏱️ 设置周期", callback_data="set_anomaly_interval"), InlineKeyboardButton("🔢 设置阈值", callback_data="set_anomaly_threshold")],[InlineKeyboardButton("📋 白名单", callback_data="anomaly_whitelist_menu"), InlineKeyboardButton("🛡️ 风控策略", callback_data="admin_risk_policy")],[InlineKeyboardButton("🧾 风控回溯", callback_data="admin_risk_audit")],[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
     elif data == "set_anomaly_interval":
         kb = [[InlineKeyboardButton("🔙 取消", callback_data="admin_anomaly_menu")]]
@@ -874,6 +987,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 fail += 1
         context.user_data.pop('broadcast_mode', None)
         await update.message.reply_text(f"📢 群发完成\n成功: {ok}\n失败: {fail}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]))
+        return
+    if user_id == ADMIN_ID and context.user_data.get('edit_subscription_settings') and text:
+        try:
+            payload = json.loads(text)
+            if not isinstance(payload, dict):
+                raise ValueError('必须是JSON对象')
+            resp = await patch_subscription_settings(payload)
+            context.user_data.pop('edit_subscription_settings', None)
+            if resp and resp.status_code in (200, 204):
+                await update.message.reply_text("✅ 订阅设置已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_subscription_settings")]]))
+            else:
+                await update.message.reply_text("❌ 更新失败，请检查字段", reply_markup=cancel_kb)
+        except Exception as exc:
+            await update.message.reply_text(f"❌ JSON解析或更新失败: {exc}", reply_markup=cancel_kb)
+        return
+
+    if user_id == ADMIN_ID and context.user_data.get('squad_bulk_move') and text:
+        try:
+            lines = [x.strip() for x in text.splitlines() if x.strip()]
+            if len(lines) < 2:
+                raise ValueError('格式不正确，至少需要分组UUID和1个用户UUID')
+            squad_uuid = lines[0]
+            uuids = parse_uuids("\n".join(lines[1:]))
+            if not uuids:
+                raise ValueError('未解析到有效用户UUID')
+            resp = await bulk_move_users_to_squad(uuids, squad_uuid)
+            context.user_data.pop('squad_bulk_move', None)
+            if resp and resp.status_code in (200, 201, 204):
+                await update.message.reply_text(f"✅ 已提交批量迁移，目标{len(uuids)}个用户", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_squads_menu")]]))
+            else:
+                await update.message.reply_text("❌ 迁移失败，请检查分组UUID与用户UUID", reply_markup=cancel_kb)
+        except Exception as exc:
+            await update.message.reply_text(f"❌ 迁移失败: {exc}", reply_markup=cancel_kb)
+        return
+
+    if user_id == ADMIN_ID and context.user_data.get('edit_risk_policy') and text:
+        try:
+            low_text, high_text = [x.strip() for x in text.split(',', 1)]
+            low = int(low_text)
+            high = int(high_text)
+            if low <= 0 or high <= low:
+                raise ValueError('要求 低阈值>0 且 高阈值>低阈值')
+            set_setting_value('risk_low_score', low)
+            set_setting_value('risk_high_score', high)
+            context.user_data.pop('edit_risk_policy', None)
+            await update.message.reply_text(f"✅ 风控策略已更新：低={low} 高={high}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_anomaly_menu")]]))
+        except Exception as exc:
+            await update.message.reply_text(f"❌ 参数错误: {exc}", reply_markup=cancel_kb)
         return
     if user_id == ADMIN_ID and 'reply_to_uid' in context.user_data:
         target_uid = context.user_data['reply_to_uid']
@@ -1370,14 +1531,36 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
 
         incidents, max_seen_ts = build_anomaly_incidents(prepared, last_scan_ts, whitelist, limit)
 
+        low_score = int(get_setting_value('risk_low_score', '80'))
+        high_score = int(get_setting_value('risk_high_score', '130'))
+
         for item in incidents:
             uid = item['uid']
-            await safe_api_request('POST', f"/users/{uid}/actions/disable")
+            score = int(item.get('score', 0))
+            if score >= high_score:
+                risk_level = '高'
+                action_taken = '禁用'
+                await safe_api_request('POST', f"/users/{uid}/actions/disable")
+            elif score >= low_score:
+                risk_level = '中'
+                action_taken = '限速'
+                await safe_api_request('PATCH', '/users', json_data={"uuid": uid, "status": "LIMITED"})
+            else:
+                risk_level = '低'
+                action_taken = '告警'
+
+            evidence_summary = '; '.join(f"{e['ip']}@{e['ts']}" for e in item['evidence'][:3])
+            db_execute(
+                "INSERT INTO anomaly_events (user_uuid, risk_level, risk_score, ip_count, ua_diversity, density, action_taken, evidence_summary, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (uid, risk_level, score, int(item['ip_count']), int(item['ua_diversity']), int(item['density']), action_taken, evidence_summary[:400], int(time.time())),
+            )
+
             try:
                 lines = [
                     "🚨 *异常检测（可解释）*",
+                    f"风险等级: `{risk_level}` \| 处置: `{action_taken}`",
                     f"用户: `{escape_markdown_v2(uid)}`",
-                    f"风险评分: `{item['score']}`",
+                    f"风险评分: `{score}`",
                     f"IP数量: `{item['ip_count']}` \| UA分散: `{item['ua_diversity']}` \| 请求密度: `{item['density']}`",
                     "证据（最近10条）:",
                 ]
@@ -1447,7 +1630,7 @@ if __name__ == '__main__':
     except Exception as exc:
         logger.warning("Failed to reschedule anomaly job at startup: %s", exc)
 
-    print(f"🚀 RemnaShop-Pro V2.5 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V2.6 已启动 | 监听中...")
     try:
         app.run_polling()
     finally:
