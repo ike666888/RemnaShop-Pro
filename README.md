@@ -68,18 +68,6 @@ RemnaShop-Pro 是一个面向 **Remnawave Panel** 的 Telegram 售卖与运维�
 - Telegram 机器人令牌
 
 
-## 🛠 环境要求
-- Debian / Ubuntu VPS
-- Python 3.9+
-- 可访问 Remnawave Panel API
-- Telegram 机器人令牌
-
-
-## 🛠 环境要求
-- Debian / Ubuntu VPS
-- Python 3.9+
-- 可访问 Remnawave Panel API
-- Telegram 机器人令牌
 
 ---
 
