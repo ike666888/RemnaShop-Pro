@@ -56,6 +56,11 @@ RemnaShop-Pro 是一个面向 **Remnawave Panel** 的 Telegram 售卖与运维�
 
 ---
 
+## 🛠 环境要求
+- Debian / Ubuntu VPS
+- Python 3.9+
+- 可访问 Remnawave Panel API
+- Telegram 机器人令牌
 
 ## 🧠 下一步建议（基于当前 API 能力与现有架构）
 - 运营效率：增加“订阅设置变更模板”与“最近变更回滚”按钮，避免管理员手写 JSON 出错。
@@ -107,6 +112,7 @@ journalctl -u remnashop -f
 
 # 重启服务
 systemctl restart remnashop
+systemctl status remnashop
 
 # 查看状态
 systemctl status remnashop
