@@ -58,10 +58,10 @@ config = load_config()
 
 ADMIN_ID = int(config['admin_id'])
 BOT_TOKEN = config['bot_token']
-PANEL_URL = config['panel_url'].rstrip('/') + '/api'
-PANEL_TOKEN = config['panel_token']
-SUB_DOMAIN = config['sub_domain'].rstrip('/')
-TARGET_GROUP_UUID = config['group_uuid']
+PANEL_URL = (config.get('panel_url') or '').rstrip('/') + '/api' if (config.get('panel_url') or '').strip() else ''
+PANEL_TOKEN = config.get('panel_token', '')
+SUB_DOMAIN = (config.get('sub_domain') or '').rstrip('/')
+TARGET_GROUP_UUID = config.get('group_uuid', '')
 PANEL_VERIFY_TLS = parse_bool(config.get('panel_verify_tls', True), default=True)
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -206,6 +206,28 @@ def set_risk_watchlist(items):
     set_json_setting('risk_watchlist', sorted({str(x) for x in items if x}))
 
 
+def panel_config_ready():
+    return bool(PANEL_URL and PANEL_TOKEN and SUB_DOMAIN and TARGET_GROUP_UUID)
+
+
+def save_runtime_config(**kwargs):
+    global PANEL_URL, PANEL_TOKEN, SUB_DOMAIN, TARGET_GROUP_UUID, PANEL_VERIFY_TLS, config
+    for k, v in kwargs.items():
+        config[k] = v
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config, f, ensure_ascii=False, indent=4)
+    if 'panel_url' in kwargs:
+        PANEL_URL = kwargs.get('panel_url', '').rstrip('/') + '/api' if kwargs.get('panel_url') else ''
+    if 'panel_token' in kwargs:
+        PANEL_TOKEN = kwargs.get('panel_token', '')
+    if 'sub_domain' in kwargs:
+        SUB_DOMAIN = kwargs.get('sub_domain', '').rstrip('/')
+    if 'group_uuid' in kwargs:
+        TARGET_GROUP_UUID = kwargs.get('group_uuid', '')
+    if 'panel_verify_tls' in kwargs:
+        PANEL_VERIFY_TLS = parse_bool(kwargs.get('panel_verify_tls'), default=True)
+
+
 init_db()
 
 
@@ -214,6 +236,9 @@ def get_headers():
 
 
 async def safe_api_request(method, endpoint, json_data=None):
+    if not PANEL_URL or not PANEL_TOKEN:
+        logger.warning('panel config missing, skip request %s %s', method, endpoint)
+        return None
     return await api_safe_request(method, endpoint, PANEL_URL, get_headers(), PANEL_VERIFY_TLS, json_data=json_data)
 
 
@@ -370,7 +395,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⚙️ 订阅设置", callback_data="admin_subscription_settings"), InlineKeyboardButton("🧩 用户分组", callback_data="admin_squads_menu")],
             [InlineKeyboardButton("📈 带宽看板", callback_data="admin_bandwidth_dashboard"), InlineKeyboardButton("🛡️ 风控策略", callback_data="admin_risk_policy")],
             [InlineKeyboardButton("🕒 操作时间线", callback_data="admin_ops_timeline"), InlineKeyboardButton("📢 群发通知", callback_data="admin_broadcast_start")],
-            [InlineKeyboardButton("💳 收款设置", callback_data="admin_pay_settings")]
+            [InlineKeyboardButton("💳 收款设置", callback_data="admin_pay_settings"), InlineKeyboardButton("🔌 面板配置", callback_data="admin_panel_config")]
         ]
     else:
         msg_text = "👋 **欢迎使用自助服务！**\n请选择操作："
@@ -710,6 +735,45 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if data == "cancel_op":
         context.user_data.clear()
         await start(update, context)
+        return
+    if data == "admin_panel_config":
+        masked = PANEL_TOKEN[:6] + "***" if PANEL_TOKEN else "未配置"
+        msg = (
+            "🔌 **面板对接配置**\n"
+            f"面板地址: `{PANEL_URL or '未配置'}`\n"
+            f"面板Token: `{masked}`\n"
+            f"订阅域名: `{SUB_DOMAIN or '未配置'}`\n"
+            f"默认组UUID: `{TARGET_GROUP_UUID or '未配置'}`\n"
+            f"TLS校验: `{PANEL_VERIFY_TLS}`\n\n"
+            "首次安装只需机器人信息，面板参数可在这里随时修改。"
+        )
+        kb = [
+            [InlineKeyboardButton("🌐 设置面板地址", callback_data="panelcfg_set_url")],
+            [InlineKeyboardButton("🔑 设置面板Token", callback_data="panelcfg_set_token")],
+            [InlineKeyboardButton("🔗 设置订阅域名", callback_data="panelcfg_set_subdomain")],
+            [InlineKeyboardButton("🧩 设置默认组UUID", callback_data="panelcfg_set_group")],
+            [InlineKeyboardButton("🔒 切换TLS校验", callback_data="panelcfg_toggle_tls")],
+            [InlineKeyboardButton("🔙 返回", callback_data="back_home")],
+        ]
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
+        return
+    if data in {"panelcfg_set_url", "panelcfg_set_token", "panelcfg_set_subdomain", "panelcfg_set_group"}:
+        mode_map = {
+            "panelcfg_set_url": ("panelcfg_input_url", "请输入面板地址（例如 https://panel.com ）"),
+            "panelcfg_set_token": ("panelcfg_input_token", "请输入面板 API Token"),
+            "panelcfg_set_subdomain": ("panelcfg_input_subdomain", "请输入订阅域名（例如 https://sub.com ）"),
+            "panelcfg_set_group": ("panelcfg_input_group", "请输入默认用户组 UUID"),
+        }
+        key, tip = mode_map[data]
+        context.user_data[key] = True
+        await send_or_edit_menu(update, context, f"✍️ {tip}", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_panel_config")]]))
+        return
+    if data == "panelcfg_toggle_tls":
+        new_val = not PANEL_VERIFY_TLS
+        save_runtime_config(panel_verify_tls=new_val)
+        append_ops_timeline('配置', '切换TLS校验', f'panel_verify_tls={new_val}', actor=query.from_user.id)
+        await query.answer(f"已切换为 {new_val}", show_alert=True)
+        await send_or_edit_menu(update, context, "✅ TLS 配置已更新。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
         return
     if data == "admin_pay_settings":
         ali = '已配置' if get_setting_value('alipay_qr_file_id') else '未配置'
@@ -1264,6 +1328,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('broadcast_mode', None)
         await update.message.reply_text(f"📢 群发完成\n成功: {ok}\n失败: {fail}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]))
         return
+    if user_id == ADMIN_ID and context.user_data.get('panelcfg_input_url') and text:
+        save_runtime_config(panel_url=text.strip())
+        context.user_data.pop('panelcfg_input_url', None)
+        await update.message.reply_text("✅ 面板地址已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
+        return
+    if user_id == ADMIN_ID and context.user_data.get('panelcfg_input_token') and text:
+        save_runtime_config(panel_token=text.strip())
+        context.user_data.pop('panelcfg_input_token', None)
+        await update.message.reply_text("✅ 面板 Token 已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
+        return
+    if user_id == ADMIN_ID and context.user_data.get('panelcfg_input_subdomain') and text:
+        save_runtime_config(sub_domain=text.strip())
+        context.user_data.pop('panelcfg_input_subdomain', None)
+        await update.message.reply_text("✅ 订阅域名已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
+        return
+    if user_id == ADMIN_ID and context.user_data.get('panelcfg_input_group') and text:
+        save_runtime_config(group_uuid=text.strip())
+        context.user_data.pop('panelcfg_input_group', None)
+        await update.message.reply_text("✅ 默认组 UUID 已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
+        return
+
     if user_id == ADMIN_ID and context.user_data.get('edit_subscription_settings') and text:
         try:
             payload = json.loads(text)
@@ -1923,6 +2008,7 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^set_anomaly_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^admin_orders_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^admin_order_"))
+    app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^panelcfg_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^anomaly_whitelist_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^anomaly_quick_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^bulk_"))
@@ -1952,7 +2038,7 @@ if __name__ == '__main__':
     except Exception as exc:
         logger.warning("Failed to reschedule anomaly job at startup: %s", exc)
 
-    print(f"🚀 RemnaShop-Pro V2.7 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V2.8 已启动 | 监听中...")
     try:
         app.run_polling()
     finally:

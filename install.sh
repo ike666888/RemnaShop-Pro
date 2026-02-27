@@ -18,7 +18,7 @@ fi
 show_menu() {
     clear
     echo -e "${GREEN}=============================================${NC}"
-    echo -e "${GREEN}        RemnaShop-Pro 管理脚本 V2.7          ${NC}"
+    echo -e "${GREEN}        RemnaShop-Pro 管理脚本 V2.8          ${NC}"
     echo -e "${GREEN}=============================================${NC}"
     echo -e "1. 🛠  安装 / 更新 (保留数据库)"
     echo -e "2. 🗑  卸载全部 (删除数据)"
@@ -71,29 +71,20 @@ install_bot() {
         echo -e "${YELLOW}>>> 检测到首次运行，请配置参数:${NC}"
         read -p "请输入管理员 TG ID (数字): " ADMIN_ID
         read -p "请输入机器人 Token: " BOT_TOKEN
-        read -p "请输入面板地址 (例如 https://panel.com): " PANEL_URL
-        read -p "请输入面板 API Token: " PANEL_TOKEN
-        read -p "请输入订阅域名 (例如 https://sub.com): " SUB_DOMAIN
-        read -p "请输入默认用户组 UUID: " GROUP_UUID
-        read -p "是否校验面板 HTTPS 证书? (Y/n): " VERIFY_TLS_INPUT
-        if [ -z "$VERIFY_TLS_INPUT" ] || [[ "$VERIFY_TLS_INPUT" =~ ^[Yy]$ ]]; then
-            VERIFY_TLS=true
-        else
-            VERIFY_TLS=false
-        fi
 
         cat > "$WORK_DIR/config.json" <<EOF
 {
     "admin_id": "$ADMIN_ID",
     "bot_token": "$BOT_TOKEN",
-    "panel_url": "$PANEL_URL",
-    "panel_token": "$PANEL_TOKEN",
-    "sub_domain": "$SUB_DOMAIN",
-    "group_uuid": "$GROUP_UUID",
-    "panel_verify_tls": $VERIFY_TLS
+    "panel_url": "",
+    "panel_token": "",
+    "sub_domain": "",
+    "group_uuid": "",
+    "panel_verify_tls": true
 }
 EOF
         echo -e "${GREEN}配置文件创建成功。${NC}"
+        echo -e "${YELLOW}提示：面板地址/Token/订阅域名/默认组UUID 请在机器人管理菜单【🔌 面板配置】中填写。${NC}"
     else
         echo -e "${YELLOW}检测到配置文件已存在，跳过配置步骤。${NC}"
     fi

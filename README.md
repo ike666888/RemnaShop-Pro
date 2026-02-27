@@ -2,7 +2,7 @@
 
 RemnaShop-Pro 是一个面向 **Remnawave Panel** 的 Telegram 售卖与运维机器人，覆盖“下单审核、自动发货、批量运营、异常风控、客服转发”的完整闭环。
 
-当前版本：`V2.7`
+当前版本：`V2.8`
 
 ---
 
@@ -61,13 +61,19 @@ RemnaShop-Pro 是一个面向 **Remnawave Panel** 的 Telegram 售卖与运维�
 
 ---
 
+
+## 🧠 下一步建议（基于当前 API 能力与现有架构）
+- 运营效率：增加“订阅设置变更模板”与“最近变更回滚”按钮，避免管理员手写 JSON 出错。
+- 分组运营：在“用户分组”增加“分组容量统计 + 一键迁移建议”，降低人工决策成本。
+- 带宽看板：补充“TOP 用户流量”与“节点异常波动提醒”，从告警走向趋势运营。
+- 风控策略：支持“观察名单”与“自动解封策略（低风险 N 小时后恢复）”，减少误杀影响。
+- 审计闭环：订单审计与风控回溯统一成“操作时间线”，可快速定位谁在什么时间做了什么动作。
+
 ## 🛠 环境要求
 - Debian / Ubuntu VPS
 - Python 3.9+
 - 可访问 Remnawave Panel API
 - Telegram 机器人令牌
-
-
 
 ---
 
@@ -80,8 +86,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main
 安装脚本会自动完成：
 1. 安装 Python 与依赖
 2. 同步 `bot.py` 与 `services/ storage/ handlers/ jobs/ utils/` 代码
-3. 首次生成 `config.json`
+3. 首次仅生成机器人基础配置（管理员ID + Bot Token）
 4. 配置并启动 `remnashop` 系统服务
+
+> 面板地址、面板Token、订阅域名、默认组UUID 现已改为在机器人管理菜单 **「🔌 面板配置」** 内配置。
 
 ---
 
@@ -91,11 +99,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main
 关键字段：
 - `admin_id`（管理员 Telegram ID）
 - `bot_token`（机器人令牌）
-- `panel_url`（面板地址）
-- `panel_token`（面板接口令牌）
-- `sub_domain`（订阅域名）
-- `group_uuid`（默认用户组 UUID）
-- `panel_verify_tls`（是否校验面板 HTTPS 证书，建议 `true`）
+- `panel_url`（面板地址，可在机器人「🔌 面板配置」填写）
+- `panel_token`（面板接口令牌，可在机器人「🔌 面板配置」填写）
+- `sub_domain`（订阅域名，可在机器人「🔌 面板配置」填写）
+- `group_uuid`（默认用户组 UUID，可在机器人「🔌 面板配置」填写）
+- `panel_verify_tls`（是否校验面板 HTTPS 证书，可在机器人「🔌 面板配置」切换）
 
 ---
 
