@@ -514,6 +514,14 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.answer("✅ 已取消订单", show_alert=True)
         else:
             await query.answer("⚠️ 仅待审核订单可取消", show_alert=True)
+        rows = db_query("SELECT * FROM orders WHERE tg_id=? ORDER BY created_at DESC LIMIT 12", (user_id,))
+        keyboard = []
+        for row in rows:
+            item = dict(row)
+            ts = datetime.datetime.fromtimestamp(int(item['created_at'])).strftime('%m-%d %H:%M')
+            keyboard.append([InlineKeyboardButton(f"{order_status_label(item['status'])} | {item['order_id']} | {ts}", callback_data=f"client_order_{item['order_id']}")])
+        keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
+        await send_or_edit_menu(update, context, "📄 **我的订单（最近12条）**", InlineKeyboardMarkup(keyboard))
         return
 
     if data.startswith("client_order_"):
@@ -710,12 +718,26 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
     back_data = f"view_sub_{short_id}" if order_type == 'renew' else "client_buy_new"
 
     keyboard = [[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")], [InlineKeyboardButton("🔙 返回", callback_data=back_data)]]
+    if created:
+        order_payment_method_cache[order["order_id"]] = payment_method
+
+    method_label = "支付宝" if payment_method == "alipay" else "微信支付"
+    qr_key = "alipay_qr_file_id" if payment_method == "alipay" else "wechat_qr_file_id"
+    qr_file_id = get_setting_value(qr_key)
+
+    if payment_method == "alipay":
+        alipay_mode = get_setting_value("alipay_collect_mode", "token")
+        pay_tip = "请在此直接发送 **支付宝口令红包** (文字) 给机器人。" if alipay_mode == "token" else "请根据下方支付宝收款码完成付款后，发送 **支付截图/备注** 给机器人。"
+    else:
+        pay_tip = "请根据下方微信收款码完成付款后，发送 **支付截图/备注** 给机器人。"
+
     msg = (
         f"📝 **订单确认 ({type_str})**\n"
         f"📦 套餐：{plan_dict['name']}\n"
         f"💰 金额：**{plan_dict['price']}**\n"
-        f"📡 流量：**{plan_dict['gb']} GB ({strategy_label})**\n\n"
-        "💳 **下一步：**\n请在此直接发送 **支付宝口令红包** (文字) 给机器人。\n👇 👇 👇"
+        f"📡 流量：**{plan_dict['gb']} GB ({strategy_label})**\n"
+        f"💳 支付方式：**{method_label}**\n\n"
+        f"💳 **下一步：**\n{pay_tip}\n👇 👇 👇"
     )
     if not created:
         msg = "⚠️ 你已有一个待审核订单，请先等待管理员处理，或取消后重新下单。"
@@ -824,10 +846,13 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if data.startswith("reply_user_"):
-        target_uid = int(data.split("_")[2])
-        context.user_data['reply_to_uid'] = target_uid
+        parts = data.split("_")
+        target_uid = int(parts[2])
+        context.user_data["reply_to_uid"] = target_uid
+        if len(parts) >= 4:
+            context.user_data["reply_return_order_id"] = parts[3]
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ 取消回复", callback_data="cancel_op")]])
-        await query.message.reply_text(f"✍️ 请输入回复给用户 `{target_uid}` 的内容 (文字/图片)：", parse_mode='Markdown', reply_markup=cancel_kb)
+        await query.message.reply_text(f"✍️ 请输入回复给用户 `{target_uid}` 的内容 (文字/图片)：", parse_mode="Markdown", reply_markup=cancel_kb)
         return
     if data == "cancel_op":
         context.user_data.clear()
@@ -931,21 +956,32 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         return
     if data == "admin_pay_settings":
-        ali = '已配置' if get_setting_value('alipay_qr_file_id') else '未配置'
-        wx = '已配置' if get_setting_value('wechat_qr_file_id') else '未配置'
+        ali = "已配置" if get_setting_value("alipay_qr_file_id") else "未配置"
+        wx = "已配置" if get_setting_value("wechat_qr_file_id") else "未配置"
+        alipay_mode = get_setting_value("alipay_collect_mode", "token")
+        mode_label = "支付宝口令收款" if alipay_mode == "token" else "支付宝收款码收款"
         msg = (
             "💳 **收款设置**\n"
             f"🟦 支付宝收款码：{ali}\n"
-            f"🟩 微信收款码：{wx}\n\n"
-            "点击按钮后发送一张收款图片即可更新。"
+            f"🟩 微信收款码：{wx}\n"
+            f"🧾 支付宝收款模式：{mode_label}\n\n"
+            "可切换支付宝收款模式，并上传对应收款图片。"
         )
         kb = [
+            [InlineKeyboardButton("支付宝口令收款", callback_data="set_alipay_mode_token"), InlineKeyboardButton("支付宝收款码收款", callback_data="set_alipay_mode_qr")],
             [InlineKeyboardButton("上传支付宝收款码", callback_data="set_payimg_alipay")],
             [InlineKeyboardButton("上传微信收款码", callback_data="set_payimg_wechat")],
             [InlineKeyboardButton("🔙 返回", callback_data="back_home")],
         ]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
         return
+    if data in {"set_alipay_mode_token", "set_alipay_mode_qr"}:
+        mode = "token" if data.endswith("token") else "qr"
+        set_setting_value("alipay_collect_mode", mode)
+        await query.answer("✅ 已更新支付宝收款模式", show_alert=True)
+        await send_or_edit_menu(update, context, "✅ 支付宝收款模式已更新。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_pay_settings")]]))
+        return
+
     if data in {"set_payimg_alipay", "set_payimg_wechat"}:
         context.user_data['set_payimg'] = 'alipay' if data.endswith('alipay') else 'wechat'
         await send_or_edit_menu(update, context, "📷 请发送收款二维码图片（可发送照片或图片文件）", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_pay_settings")]]))
@@ -1582,14 +1618,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.copy_message(chat_id=target_uid, from_chat_id=user_id, message_id=update.message.message_id)
             await context.bot.send_message(target_uid, "👆 **(来自客服的回复)**", parse_mode='Markdown')
-            admin_done_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
+            order_id = context.user_data.get("reply_return_order_id")
+            back_cb = f"admin_order_{order_id}" if order_id else "back_home"
+            admin_done_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回上一页", callback_data=back_cb)]])
             await update.message.reply_text("✅ 回复已送达！", reply_markup=admin_done_kb)
-        except Exception as e: await update.message.reply_text(f"❌ 发送失败：{e}")
+        except Exception as e:
+            await update.message.reply_text(f"❌ 发送失败：{e}")
         del context.user_data['reply_to_uid']
+        context.user_data.pop("reply_return_order_id", None)
         return
     if context.user_data.get('chat_mode') == 'support':
         admin_header = f"📨 **新客服消息**\n来自：{update.effective_user.mention_html()} (`{user_id}`)"
-        reply_kb = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ 回复此用户", callback_data=f"reply_user_{user_id}")]])
+        reply_kb = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ 回复此用户", callback_data=f"reply_user_{user_id}_{pending_order['order_id']}")]])
         await context.bot.send_message(ADMIN_ID, admin_header, reply_markup=reply_kb, parse_mode='HTML')
         await context.bot.copy_message(chat_id=ADMIN_ID, from_chat_id=user_id, message_id=update.message.message_id)
         await update.message.reply_text("✅ 已转发")
@@ -1726,7 +1766,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [
             [InlineKeyboardButton("✅ 通过", callback_data=f"ap_{pending_order['order_id']}_{sid}")],
             [InlineKeyboardButton("❌ 拒绝", callback_data=f"rj_{pending_order['order_id']}")],
-            [InlineKeyboardButton("📨 给用户发消息", callback_data=f"reply_user_{user_id}")],
+            [InlineKeyboardButton("📨 给用户发消息", callback_data=f"reply_user_{user_id}_{pending_order['order_id']}")],
         ]
 
         if text:
@@ -2236,7 +2276,7 @@ if __name__ == '__main__':
     except Exception as exc:
         logger.warning("Failed to reschedule anomaly job at startup: %s", exc)
 
-    print(f"🚀 RemnaShop-Pro V3.0 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V3.1 已启动 | 监听中...")
     try:
         app.run_polling()
     finally:
