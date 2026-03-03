@@ -151,9 +151,7 @@ uninstall_bot() {
     echo -e "${YELLOW}正在停止服务...${NC}"
     systemctl stop remnashop 2>/dev/null || true
     systemctl disable remnashop 2>/dev/null || true
-    systemctl stop remnashop-web 2>/dev/null || true
-    systemctl disable remnashop-web 2>/dev/null || true
-    rm -f "$SERVICE_FILE" "$WEB_SERVICE_FILE"
+    rm -f "$SERVICE_FILE"
     systemctl daemon-reload
     rm -rf "$WORK_DIR"
     echo -e "${GREEN}✅ 卸载完成。所有痕迹已清理。${NC}"
