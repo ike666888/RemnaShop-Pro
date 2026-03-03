@@ -51,8 +51,30 @@ install_bot() {
     fi
 
     echo -e "${YELLOW}正在拉取最新代码...${NC}"
-    curl -fL --retry 3 --retry-delay 2 -o "$WORK_DIR/bot.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/bot.py
+    TMP_DIR=$(mktemp -d)
+    ARCHIVE_URL="https://codeload.github.com/ike666888/RemnaShop-Pro/tar.gz/refs/heads/main"
+    curl -fL --retry 3 --retry-delay 2 -o "$TMP_DIR/repo.tar.gz" "$ARCHIVE_URL"
+    tar -xzf "$TMP_DIR/repo.tar.gz" -C "$TMP_DIR"
 
+    SRC_DIR=$(find "$TMP_DIR" -maxdepth 1 -type d -name "RemnaShop-Pro-*" | head -n 1)
+    if [ -z "${SRC_DIR:-}" ] || [ ! -d "$SRC_DIR" ]; then
+        echo -e "${RED}代码解压失败，未找到项目目录。${NC}"
+        rm -rf "$TMP_DIR"
+        exit 1
+    fi
+
+    mkdir -p "$WORK_DIR/handlers" "$WORK_DIR/jobs" "$WORK_DIR/services" "$WORK_DIR/storage" "$WORK_DIR/utils"
+    cp -f "$SRC_DIR/bot.py" "$WORK_DIR/bot.py"
+    cp -f "$SRC_DIR"/*.py "$WORK_DIR/" 2>/dev/null || true
+    cp -f "$SRC_DIR/handlers"/*.py "$WORK_DIR/handlers/" 2>/dev/null || true
+    cp -f "$SRC_DIR/jobs"/*.py "$WORK_DIR/jobs/" 2>/dev/null || true
+    cp -f "$SRC_DIR/services"/*.py "$WORK_DIR/services/" 2>/dev/null || true
+    cp -f "$SRC_DIR/storage"/*.py "$WORK_DIR/storage/" 2>/dev/null || true
+    cp -f "$SRC_DIR/utils"/*.py "$WORK_DIR/utils/" 2>/dev/null || true
+
+    rm -rf "$TMP_DIR"
+
+    find "$WORK_DIR" -type d -name "__pycache__" -prune -exec rm -rf {} + || true
     chmod +x "$WORK_DIR/bot.py"
     echo -e "${GREEN}代码文件同步完成。${NC}"
 
@@ -98,22 +120,10 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-    cat > "$WEB_SERVICE_FILE" <<EOF
-[Unit]
-Description=RemnaShop-Pro Web Admin
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=$WORK_DIR
-ExecStart=/usr/bin/python3 -m uvicorn web_admin.app:app --host 0.0.0.0 --port 8787
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    if [ -f "$WEB_SERVICE_FILE" ]; then
+        systemctl disable --now remnashop-web 2>/dev/null || true
+        rm -f "$WEB_SERVICE_FILE"
+    fi
 
     systemctl daemon-reload
     systemctl enable remnashop
@@ -139,10 +149,10 @@ uninstall_bot() {
     fi
 
     echo -e "${YELLOW}正在停止服务...${NC}"
-    systemctl stop remnashop || true
-    systemctl disable remnashop || true
-    systemctl stop remnashop-web || true
-    systemctl disable remnashop-web || true
+    systemctl stop remnashop 2>/dev/null || true
+    systemctl disable remnashop 2>/dev/null || true
+    systemctl stop remnashop-web 2>/dev/null || true
+    systemctl disable remnashop-web 2>/dev/null || true
     rm -f "$SERVICE_FILE" "$WEB_SERVICE_FILE"
     systemctl daemon-reload
     rm -rf "$WORK_DIR"
