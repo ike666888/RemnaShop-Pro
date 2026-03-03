@@ -8,6 +8,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 WORK_DIR="/opt/RemnaShop"
 SERVICE_FILE="/etc/systemd/system/remnashop.service"
+WEB_SERVICE_FILE="/etc/systemd/system/remnashop-web.service"
 
 # 检查是否为 root
 if [ "$EUID" -ne 0 ]; then 
@@ -18,7 +19,7 @@ fi
 show_menu() {
     clear
     echo -e "${GREEN}=============================================${NC}"
-    echo -e "${GREEN}        RemnaShop-Pro 管理脚本 V3.4          ${NC}"
+    echo -e "${GREEN}        RemnaShop-Pro 管理脚本 V3.6          ${NC}"
     echo -e "${GREEN}=============================================${NC}"
     echo -e "1. 🛠  安装 / 更新 (保留数据库)"
     echo -e "2. 🗑  卸载全部 (删除数据)"
@@ -44,7 +45,7 @@ install_bot() {
     fi
 
     echo -e "${YELLOW}正在安装/更新 Python 依赖...${NC}"
-    pip3 install python-telegram-bot[job-queue] httpx qrcode[pil] --break-system-packages
+    pip3 install python-telegram-bot[job-queue] httpx qrcode[pil] fastapi uvicorn --break-system-packages
 
     if [ ! -d "$WORK_DIR" ]; then
         mkdir -p "$WORK_DIR"
@@ -52,7 +53,7 @@ install_bot() {
     fi
 
     echo -e "${YELLOW}正在拉取最新代码...${NC}"
-    mkdir -p "$WORK_DIR/services" "$WORK_DIR/storage" "$WORK_DIR/utils" "$WORK_DIR/handlers" "$WORK_DIR/jobs"
+    mkdir -p "$WORK_DIR/services" "$WORK_DIR/storage" "$WORK_DIR/utils" "$WORK_DIR/handlers" "$WORK_DIR/jobs" "$WORK_DIR/web_admin"
     curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/bot.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/bot.py
     curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/services/orders.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/services/orders.py
     curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/services/panel_api.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/services/panel_api.py
@@ -63,6 +64,8 @@ install_bot() {
     curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/handlers/client.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/handlers/client.py
     curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/jobs/anomaly.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/jobs/anomaly.py
     curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/jobs/expiry.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/jobs/expiry.py
+    curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/web_admin/__init__.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/web_admin/__init__.py
+    curl -fL --retry 3 --connect-timeout 10 -o "$WORK_DIR/web_admin/app.py" https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/web_admin/app.py
 
     chmod +x "$WORK_DIR/bot.py"
     echo -e "${GREEN}代码文件同步完成。${NC}"
@@ -80,7 +83,8 @@ install_bot() {
     "panel_token": "",
     "sub_domain": "",
     "group_uuid": "",
-    "panel_verify_tls": true
+    "panel_verify_tls": true,
+    "admin_web_token": ""
 }
 EOF
         echo -e "${GREEN}配置文件创建成功。${NC}"
@@ -107,9 +111,30 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+    cat > "$WEB_SERVICE_FILE" <<EOF
+[Unit]
+Description=RemnaShop-Pro Web Admin
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$WORK_DIR
+ExecStart=/usr/bin/python3 -m uvicorn web_admin.app:app --host 0.0.0.0 --port 8787
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
     systemctl daemon-reload
     systemctl enable remnashop
     systemctl restart remnashop
+    systemctl enable remnashop-web
+    systemctl restart remnashop-web
+
+    echo -e "${YELLOW}Web 管理台已启动: http://<你的IP>:8787/docs${NC}"
 
     echo -e "${GREEN}=============================================${NC}"
     echo -e "${GREEN}🎉 安装/更新 完成！${NC}"
@@ -127,9 +152,11 @@ uninstall_bot() {
     fi
 
     echo -e "${YELLOW}正在停止服务...${NC}"
-    systemctl stop remnashop
-    systemctl disable remnashop
-    rm -f "$SERVICE_FILE"
+    systemctl stop remnashop || true
+    systemctl disable remnashop || true
+    systemctl stop remnashop-web || true
+    systemctl disable remnashop-web || true
+    rm -f "$SERVICE_FILE" "$WEB_SERVICE_FILE"
     systemctl daemon-reload
     rm -rf "$WORK_DIR"
     echo -e "${GREEN}✅ 卸载完成。所有痕迹已清理。${NC}"
