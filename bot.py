@@ -148,6 +148,71 @@ def get_setting_bool(key, default=True):
     raw = str(get_setting_value(key, "1" if default else "0")).strip().lower()
     return raw in {"1", "true", "yes", "on", "开启", "开"}
 
+def resolve_payment_state(payment_method):
+    alipay_enabled = get_setting_bool("alipay_enabled", True)
+    wechat_enabled = get_setting_bool("wechat_enabled", True)
+    alipay_token_enabled = get_setting_bool("alipay_token_enabled", True)
+    alipay_qr_enabled = get_setting_bool("alipay_qr_enabled", True)
+
+    method_label = "支付宝" if payment_method == "alipay" else "微信支付"
+    qr_key = "alipay_qr_file_id" if payment_method == "alipay" else "wechat_qr_file_id"
+    qr_file_id = get_setting_value(qr_key)
+
+    if payment_method == "alipay":
+        if not alipay_enabled:
+            return {
+                'available': False,
+                'method_label': method_label,
+                'should_send_qr': False,
+                'qr_file_id': qr_file_id,
+                'pay_tip': "管理员未配置收款，请等待管理配置收款。",
+            }
+        if alipay_token_enabled:
+            return {
+                'available': True,
+                'method_label': method_label,
+                'should_send_qr': False,
+                'qr_file_id': qr_file_id,
+                'pay_tip': "请在下方直接发送 **支付宝口令红包**（文字）给机器人。",
+            }
+        if alipay_qr_enabled and qr_file_id:
+            return {
+                'available': True,
+                'method_label': method_label,
+                'should_send_qr': True,
+                'qr_file_id': qr_file_id,
+                'pay_tip': "请按下方支付宝收款码完成付款后，发送 **支付截图/备注** 给机器人。",
+            }
+        return {
+            'available': False,
+            'method_label': method_label,
+            'should_send_qr': False,
+            'qr_file_id': qr_file_id,
+            'pay_tip': "管理员未配置收款，请等待管理配置收款。",
+        }
+
+    if wechat_enabled and qr_file_id:
+        return {
+            'available': True,
+            'method_label': method_label,
+            'should_send_qr': True,
+            'qr_file_id': qr_file_id,
+            'pay_tip': "请按下方微信收款码完成付款后，发送 **支付截图/备注** 给机器人。",
+        }
+    return {
+        'available': False,
+        'method_label': method_label,
+        'should_send_qr': False,
+        'qr_file_id': qr_file_id,
+        'pay_tip': "管理员未配置收款，请等待管理配置收款。",
+    }
+
+
+def is_any_payment_available():
+    ali = resolve_payment_state('alipay')['available']
+    wx = resolve_payment_state('wechat')['available']
+    return ali or wx
+
 
 def get_json_setting(key, default):
     raw = get_setting_value(key)
@@ -498,6 +563,12 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.answer("当前没有待提交审核的订单", show_alert=True)
             return
 
+        pay_method = order_payment_method_cache.get(pending['order_id'], 'alipay')
+        pay_state = resolve_payment_state(pay_method)
+        if not pay_state['available']:
+            await query.answer("当前支付方式不可用，请等待管理员配置收款。", show_alert=True)
+            return
+
         proof = context.user_data.get('pending_payment_proof')
         if not proof or proof.get('order_id') != pending['order_id']:
             await query.answer("请先发送支付截图/文件/口令，再点击此按钮提交。", show_alert=True)
@@ -507,10 +578,10 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not plan:
             await query.answer("订单套餐已失效，请重新下单", show_alert=True)
             update_order_status(db_execute, pending['order_id'], [STATUS_PENDING], STATUS_FAILED, error_message='plan_deleted')
+            context.user_data.pop('pending_payment_proof', None)
             return
 
         t_str = "续费" if pending['order_type'] == 'renew' else "新购"
-        pay_method = order_payment_method_cache.get(pending['order_id'], 'alipay')
         pay_label = "支付宝" if pay_method == 'alipay' else "微信支付"
         target_uuid = pending['target_uuid'] if pending['target_uuid'] else "0"
         sid = get_short_id(target_uuid) if target_uuid != "0" else "0"
@@ -568,6 +639,10 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         context.user_data.pop('pending_payment_proof', None)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         msg_obj = await query.message.reply_text(
             "✅ 已提交，等待管理员审核。",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]),
@@ -576,6 +651,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         attach_payment_text(db_execute, pending['order_id'], f"方式:{pay_label}|{proof_text}", waiting_message_id=msg_obj.message_id)
         await query.answer("提交成功", show_alert=True)
         return
+
 
     if data == "client_orders":
         rows = db_query("SELECT * FROM orders WHERE tg_id=? ORDER BY created_at DESC LIMIT 12", (user_id,))
@@ -776,15 +852,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def show_payment_method_menu(update, context, plan_key, order_type, short_id):
     type_str = "续费" if order_type == 'renew' else "新购"
 
-    alipay_enabled = get_setting_bool("alipay_enabled", True)
-    wechat_enabled = get_setting_bool("wechat_enabled", True)
-    alipay_token_enabled = get_setting_bool("alipay_token_enabled", True)
-    alipay_qr_enabled = get_setting_bool("alipay_qr_enabled", True)
-
-    alipay_available = alipay_enabled and (alipay_token_enabled or alipay_qr_enabled)
-    wechat_available = wechat_enabled
-
-    if not alipay_available and not wechat_available:
+    if not is_any_payment_available():
         msg = "⚠️ 管理员未配置收款，请等待管理配置收款。"
         kb = [[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
@@ -792,9 +860,9 @@ async def show_payment_method_menu(update, context, plan_key, order_type, short_
 
     msg = f"💳 **选择支付方式（{type_str}）**\n请选择收款方式："
     kb = []
-    if alipay_available:
+    if resolve_payment_state('alipay')['available']:
         kb.append([InlineKeyboardButton("🟦 支付宝", callback_data=f"paymethod_alipay_{plan_key}_{order_type}_{short_id}")])
-    if wechat_available:
+    if resolve_payment_state('wechat')['available']:
         kb.append([InlineKeyboardButton("🟩 微信支付", callback_data=f"paymethod_wechat_{plan_key}_{order_type}_{short_id}")])
     kb.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
     await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
@@ -814,43 +882,16 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
 
     type_str = "续费" if order_type == 'renew' else "新购"
     back_data = f"view_sub_{short_id}" if order_type == 'renew' else "client_buy_new"
-
     keyboard = [
-        [InlineKeyboardButton("✅ 完成支付并上传支付凭证", callback_data="client_pay_done_upload")],
         [InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")],
         [InlineKeyboardButton("🔙 返回", callback_data=back_data)],
     ]
 
-    method_label = "支付宝" if payment_method == "alipay" else "微信支付"
-    qr_key = "alipay_qr_file_id" if payment_method == "alipay" else "wechat_qr_file_id"
-    qr_file_id = get_setting_value(qr_key)
-
-    alipay_enabled = get_setting_bool("alipay_enabled", True)
-    wechat_enabled = get_setting_bool("wechat_enabled", True)
-    alipay_token_enabled = get_setting_bool("alipay_token_enabled", True)
-    alipay_qr_enabled = get_setting_bool("alipay_qr_enabled", True)
-
-    payment_available = True
-    should_send_qr = False
-    if payment_method == "alipay":
-        if not alipay_enabled:
-            payment_available = False
-            pay_tip = "管理员未配置收款，请等待管理配置收款。"
-        elif alipay_token_enabled:
-            pay_tip = "请在下方直接发送 **支付宝口令红包**（文字）给机器人。"
-        elif alipay_qr_enabled:
-            pay_tip = "请按下方支付宝收款码完成付款后，发送 **支付截图/备注** 给机器人。"
-            should_send_qr = True
-        else:
-            payment_available = False
-            pay_tip = "管理员未配置收款，请等待管理配置收款。"
-    else:
-        if not wechat_enabled:
-            payment_available = False
-            pay_tip = "管理员未配置收款，请等待管理配置收款。"
-        else:
-            pay_tip = "请按下方微信收款码完成付款后，发送 **支付截图/备注** 给机器人。"
-            should_send_qr = True
+    pay_state = resolve_payment_state(payment_method)
+    method_label = pay_state['method_label']
+    pay_tip = pay_state['pay_tip']
+    should_send_qr = pay_state['should_send_qr']
+    qr_file_id = pay_state['qr_file_id']
 
     msg = (
         f"📝 **订单确认 ({type_str})**\n"
@@ -861,7 +902,7 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
         f"💳 **下一步：**\n{pay_tip}"
     )
 
-    if not payment_available:
+    if not pay_state['available']:
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         return
 
@@ -884,7 +925,7 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
             await context.bot.send_photo(
                 chat_id=user_id,
                 photo=qr_file_id,
-                caption=f"{msg}\n\n👇 请先发送支付凭证，再点击“完成支付并上传支付凭证”。",
+                caption=f"{msg}\n\n👇 请先发送支付凭证，发送后系统会出现提交按钮。",
                 parse_mode='Markdown',
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
@@ -897,10 +938,8 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
         except Exception as exc:
             logger.warning("发送收款码失败: %s", exc)
             msg += "\n\n⚠️ 当前收款码未能发送，请联系管理员。"
-    elif should_send_qr and not qr_file_id:
-        msg += "\n\n⚠️ 管理员暂未配置该支付方式收款码，请联系管理员。"
 
-    msg += "\n\n👇 请先发送支付凭证，再点击“完成支付并上传支付凭证”。"
+    msg += "\n\n👇 请先发送支付凭证，发送后系统会出现提交按钮。"
     await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
     if created and qr_file_id:
         try:
@@ -2021,6 +2060,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_order_status(db_execute, pending_order['order_id'], [STATUS_PENDING], STATUS_FAILED, error_message='plan_deleted')
             return
 
+        pay_method = order_payment_method_cache.get(pending_order['order_id'], 'alipay')
+        pay_state = resolve_payment_state(pay_method)
+        if not pay_state['available']:
+            await update.message.reply_text("⚠️ 当前支付方式未配置可用收款，请等待管理员配置后再支付。")
+            return
+
         proof_payload = {
             'order_id': pending_order['order_id'],
             'type': 'text' if text else ('photo' if update.message.photo else 'document'),
@@ -2035,6 +2080,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ 完成支付并上传支付凭证", callback_data="client_pay_done_upload")]]),
         )
         return
+
 
 async def add_plan_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2509,7 +2555,7 @@ if __name__ == '__main__':
     except Exception as exc:
         logger.warning("Failed to reschedule anomaly job at startup: %s", exc)
 
-    print(f"🚀 RemnaShop-Pro V3.4 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V3.5 已启动 | 监听中...")
     try:
         app.run_polling()
     finally:
