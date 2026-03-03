@@ -1,5 +1,8 @@
 # 🚀 RemnaShop-Pro
 
+当前版本：`V3.5`
+
+
 
 
 **RemnaShop-Pro** 是专为 **Remnawave** 面板打造的专业级 Telegram 自动售卖与管理机器人。
