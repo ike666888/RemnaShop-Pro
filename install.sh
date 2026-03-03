@@ -8,6 +8,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 WORK_DIR="/opt/RemnaShop"
 SERVICE_FILE="/etc/systemd/system/remnashop.service"
+WEB_SERVICE_FILE="/etc/systemd/system/remnashop-web.service"
 
 # 检查是否为 root
 if [ "$EUID" -ne 0 ]; then 
@@ -81,22 +82,22 @@ install_bot() {
         echo -e "${YELLOW}>>> 检测到首次运行，请配置参数:${NC}"
         read -p "请输入管理员 TG ID (数字): " ADMIN_ID
         read -p "请输入机器人 Token: " BOT_TOKEN
-        read -p "请输入面板地址 (例如 https://panel.com): " PANEL_URL
-        read -p "请输入面板 API Token: " PANEL_TOKEN
-        read -p "请输入订阅域名 (例如 https://sub.com): " SUB_DOMAIN
-        read -p "请输入默认用户组 UUID: " GROUP_UUID
 
         cat > "$WORK_DIR/config.json" <<EOF
 {
     "admin_id": "$ADMIN_ID",
     "bot_token": "$BOT_TOKEN",
-    "panel_url": "$PANEL_URL",
-    "panel_token": "$PANEL_TOKEN",
-    "sub_domain": "$SUB_DOMAIN",
-    "group_uuid": "$GROUP_UUID"
+    "panel_url": "",
+    "panel_token": "",
+    "sub_domain": "",
+    "group_uuid": "",
+    "panel_verify_tls": true,
+    "admin_web_token": "",
+    "web_admin_url": ""
 }
 EOF
         echo -e "${GREEN}配置文件创建成功。${NC}"
+        echo -e "${YELLOW}提示：面板地址/Token/订阅域名/默认组UUID 请在机器人管理菜单【🔌 面板配置】中填写。${NC}"
     else
         echo -e "${YELLOW}检测到配置文件已存在，跳过配置步骤。${NC}"
     fi
@@ -119,9 +120,18 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+    if [ -f "$WEB_SERVICE_FILE" ]; then
+        systemctl disable --now remnashop-web 2>/dev/null || true
+        rm -f "$WEB_SERVICE_FILE"
+    fi
+
     systemctl daemon-reload
     systemctl enable remnashop
     systemctl restart remnashop
+    systemctl enable remnashop-web
+    systemctl restart remnashop-web
+
+    echo -e "${YELLOW}Web 管理台已启动: http://<你的IP>:8787/docs${NC}"
 
     echo -e "${GREEN}=============================================${NC}"
     echo -e "${GREEN}🎉 安装/更新 完成！${NC}"

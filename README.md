@@ -78,6 +78,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main
 
 ## 常用运维命令
 
+## 🔧 运维命令
 ```bash
 # 查看日志
 journalctl -u remnashop -f
