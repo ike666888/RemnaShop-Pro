@@ -859,5 +859,5 @@ if __name__ == '__main__':
                 loop.create_task(reschedule_anomaly_job(app, val_int['value']))
     except: pass
 
-    print(f"🚀 RemnaShop-Pro V2.4 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V3.5 已启动 | 监听中...")
     app.run_polling()
