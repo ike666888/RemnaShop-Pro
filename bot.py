@@ -2568,12 +2568,5 @@ if __name__ == '__main__':
     except Exception as exc:
         logger.warning("Failed to reschedule anomaly job at startup: %s", exc)
 
-    print(f"🚀 RemnaShop-Pro V3.7 已启动 | 监听中...")
-    try:
-        app.run_polling()
-    finally:
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(close_all_clients())
-        finally:
-            loop.close()
+    print(f"🚀 RemnaShop-Pro V3.5 已启动 | 监听中...")
+    app.run_polling()
