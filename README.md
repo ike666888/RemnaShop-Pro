@@ -2,7 +2,7 @@
 
 RemnaShop-Pro 是一个面向 **Remnawave Panel** 的 Telegram 售卖与运维机器人，覆盖“下单审核、自动发货、批量运营、异常风控、客服转发”的完整闭环。
 
-当前版本：`V3.6`
+当前版本：`V3.7`
 
 ---
 
@@ -92,11 +92,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main
 
 ## 🌐 Telegram + Web 管理台并存
 
-从 V3.6 开始支持与 Telegram 机器人并存的 Web 管理台（FastAPI）：
+从 V3.7 开始支持与 Telegram 机器人并存的 Web 管理台（FastAPI）：
 
 - 默认地址：`http://服务器IP:8787/docs`
 - 默认服务名：`remnashop-web`
 - 认证方式：请求头 `X-Admin-Token`
+- 在机器人管理菜单「🔌 面板配置」中设置 `Web管理台地址` 后，管理员首页会出现「🌐 Telegram内置 Web 管理台」按钮
 
 首次启动 Web 管理台时，如果 `config.json` 中 `admin_web_token` 为空，会自动生成并写回配置。
 
@@ -122,6 +123,7 @@ curl -H "X-Admin-Token: 你的admin_web_token" \
 - `group_uuid`（默认用户组 UUID，可在机器人「🔌 面板配置」填写）
 - `panel_verify_tls`（是否校验面板 HTTPS 证书，可在机器人「🔌 面板配置」切换）
 - `admin_web_token`（Web 管理台认证令牌，HTTP 请求头使用 `X-Admin-Token`）
+- `web_admin_url`（Telegram 内置 Web 管理台地址，可在机器人「🔌 面板配置」中设置）
 
 ---
 
