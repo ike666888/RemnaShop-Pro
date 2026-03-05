@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # 定义颜色
 GREEN='\033[0;32m'
@@ -7,6 +8,8 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 WORK_DIR="/opt/RemnaShop"
 SERVICE_FILE="/etc/systemd/system/remnashop.service"
+LEGACY_WEB_SERVICE_FILE="/etc/systemd/system/remnashop-web.service"
+LEGACY_WEB_WANTS_LINK="/etc/systemd/system/multi-user.target.wants/remnashop-web.service"
 
 # 检查是否为 root
 if [ "$EUID" -ne 0 ]; then 
@@ -17,7 +20,7 @@ fi
 show_menu() {
     clear
     echo -e "${GREEN}=============================================${NC}"
-    echo -e "${GREEN}        RemnaShop-Pro 管理脚本 V2.4          ${NC}"
+    echo -e "${GREEN}        RemnaShop-Pro 管理脚本 V3.5          ${NC}"
     echo -e "${GREEN}=============================================${NC}"
     echo -e "1. 🛠  安装 / 更新 (保留数据库)"
     echo -e "2. 🗑  卸载全部 (删除数据)"
@@ -30,9 +33,7 @@ install_bot() {
     echo -e "${YELLOW}>>> 开始安装流程...${NC}"
 
     echo -e "${YELLOW}正在检查环境依赖...${NC}"
-    if [ ! -f "/var/lib/apt/lists/lock" ]; then
-        apt-get update -y
-    fi
+    apt-get update -y
     if ! command -v python3 &> /dev/null; then
         echo -e "${YELLOW}未检测到 Python3，正在安装...${NC}"
         apt-get install -y python3
@@ -43,7 +44,7 @@ install_bot() {
     fi
 
     echo -e "${YELLOW}正在安装/更新 Python 依赖...${NC}"
-    pip3 install python-telegram-bot[job-queue] requests httpx qrcode[pil] --break-system-packages
+    pip3 install python-telegram-bot[job-queue] httpx qrcode[pil] --break-system-packages
 
     if [ ! -d "$WORK_DIR" ]; then
         mkdir -p "$WORK_DIR"
@@ -51,10 +52,32 @@ install_bot() {
     fi
 
     echo -e "${YELLOW}正在拉取最新代码...${NC}"
-    curl -o $WORK_DIR/bot.py https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/bot.py
+    TMP_DIR=$(mktemp -d)
+    ARCHIVE_URL="https://codeload.github.com/ike666888/RemnaShop-Pro/tar.gz/refs/heads/main"
+    curl -fL --retry 3 --retry-delay 2 -o "$TMP_DIR/repo.tar.gz" "$ARCHIVE_URL"
+    tar -xzf "$TMP_DIR/repo.tar.gz" -C "$TMP_DIR"
 
+    SRC_DIR=$(find "$TMP_DIR" -maxdepth 1 -type d -name "RemnaShop-Pro-*" | head -n 1)
+    if [ -z "${SRC_DIR:-}" ] || [ ! -d "$SRC_DIR" ]; then
+        echo -e "${RED}代码解压失败，未找到项目目录。${NC}"
+        rm -rf "$TMP_DIR"
+        exit 1
+    fi
+
+    mkdir -p "$WORK_DIR/handlers" "$WORK_DIR/jobs" "$WORK_DIR/services" "$WORK_DIR/storage" "$WORK_DIR/utils"
+    cp -f "$SRC_DIR/bot.py" "$WORK_DIR/bot.py"
+    cp -f "$SRC_DIR"/*.py "$WORK_DIR/" 2>/dev/null || true
+    cp -f "$SRC_DIR/handlers"/*.py "$WORK_DIR/handlers/" 2>/dev/null || true
+    cp -f "$SRC_DIR/jobs"/*.py "$WORK_DIR/jobs/" 2>/dev/null || true
+    cp -f "$SRC_DIR/services"/*.py "$WORK_DIR/services/" 2>/dev/null || true
+    cp -f "$SRC_DIR/storage"/*.py "$WORK_DIR/storage/" 2>/dev/null || true
+    cp -f "$SRC_DIR/utils"/*.py "$WORK_DIR/utils/" 2>/dev/null || true
+
+    rm -rf "$TMP_DIR"
+
+    find "$WORK_DIR" -type d -name "__pycache__" -prune -exec rm -rf {} + || true
     chmod +x "$WORK_DIR/bot.py"
-    echo -e "${GREEN}已赋予脚本执行权限。${NC}"
+    echo -e "${GREEN}代码文件同步完成。${NC}"
 
     if [ ! -f "$WORK_DIR/config.json" ]; then
         echo -e "${YELLOW}>>> 检测到首次运行，请配置参数:${NC}"
@@ -98,6 +121,11 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+    # 兼容历史版本：清理遗留 Web 服务配置，避免出现“enable remnashop-web”相关报错
+    systemctl disable remnashop-web 2>/dev/null || true
+    systemctl stop remnashop-web 2>/dev/null || true
+    rm -f "$LEGACY_WEB_SERVICE_FILE" "$LEGACY_WEB_WANTS_LINK"
+
     systemctl daemon-reload
     systemctl enable remnashop
     systemctl restart remnashop
@@ -118,9 +146,12 @@ uninstall_bot() {
     fi
 
     echo -e "${YELLOW}正在停止服务...${NC}"
-    systemctl stop remnashop
-    systemctl disable remnashop
+    systemctl stop remnashop 2>/dev/null || true
+    systemctl disable remnashop 2>/dev/null || true
+    systemctl stop remnashop-web 2>/dev/null || true
+    systemctl disable remnashop-web 2>/dev/null || true
     rm -f "$SERVICE_FILE"
+    rm -f "$LEGACY_WEB_SERVICE_FILE" "$LEGACY_WEB_WANTS_LINK"
     systemctl daemon-reload
     rm -rf "$WORK_DIR"
     echo -e "${GREEN}✅ 卸载完成。所有痕迹已清理。${NC}"
