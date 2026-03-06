@@ -92,9 +92,7 @@ install_bot() {
     "panel_token": "",
     "sub_domain": "",
     "group_uuid": "",
-    "panel_verify_tls": true,
-    "admin_web_token": "",
-    "web_admin_url": ""
+    "panel_verify_tls": true
 }
 EOF
         echo -e "${GREEN}配置文件创建成功。${NC}"
@@ -129,10 +127,6 @@ EOF
     systemctl daemon-reload
     systemctl enable remnashop
     systemctl restart remnashop
-    systemctl enable remnashop-web
-    systemctl restart remnashop-web
-
-    echo -e "${YELLOW}Web 管理台已启动: http://<你的IP>:8787/docs${NC}"
 
     echo -e "${GREEN}=============================================${NC}"
     echo -e "${GREEN}🎉 安装/更新 完成！${NC}"

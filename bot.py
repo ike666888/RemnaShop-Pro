@@ -30,7 +30,7 @@ from handlers.admin import format_order_detail, format_order_row, order_status_l
 from handlers.client import build_nodes_status_message
 from jobs.anomaly import build_anomaly_incidents
 from jobs.expiry import should_send_expire_notice
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -63,7 +63,6 @@ PANEL_TOKEN = config.get('panel_token', '')
 SUB_DOMAIN = (config.get('sub_domain') or '').rstrip('/')
 TARGET_GROUP_UUID = config.get('group_uuid', '')
 PANEL_VERIFY_TLS = parse_bool(config.get('panel_verify_tls', True), default=True)
-WEB_ADMIN_URL = (config.get('web_admin_url') or '').strip()
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
@@ -313,7 +312,7 @@ def panel_config_ready():
 
 
 def save_runtime_config(**kwargs):
-    global PANEL_URL, PANEL_TOKEN, SUB_DOMAIN, TARGET_GROUP_UUID, PANEL_VERIFY_TLS, WEB_ADMIN_URL, config
+    global PANEL_URL, PANEL_TOKEN, SUB_DOMAIN, TARGET_GROUP_UUID, PANEL_VERIFY_TLS, config
     for k, v in kwargs.items():
         config[k] = v
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -328,8 +327,6 @@ def save_runtime_config(**kwargs):
         TARGET_GROUP_UUID = kwargs.get('group_uuid', '')
     if 'panel_verify_tls' in kwargs:
         PANEL_VERIFY_TLS = parse_bool(kwargs.get('panel_verify_tls'), default=True)
-    if 'web_admin_url' in kwargs:
-        WEB_ADMIN_URL = (kwargs.get('web_admin_url') or '').strip()
 
 
 init_db()
@@ -508,8 +505,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💳 收款设置", callback_data="admin_pay_settings"), InlineKeyboardButton("🔌 面板配置", callback_data="admin_panel_config")],
             [InlineKeyboardButton("🧩 模板中心", callback_data="admin_template_center"), InlineKeyboardButton("🗂 批量任务", callback_data="admin_bulk_jobs")]
         ]
-        if WEB_ADMIN_URL:
-            keyboard.append([InlineKeyboardButton("🌐 Telegram内置 Web 管理台", web_app=WebAppInfo(url=WEB_ADMIN_URL))])
     else:
         msg_text = "👋 **欢迎使用自助服务！**\n请选择操作："
         keyboard = [
@@ -1079,7 +1074,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"订阅域名: `{SUB_DOMAIN or '未配置'}`\n"
             f"默认组UUID: `{TARGET_GROUP_UUID or '未配置'}`\n"
             f"TLS校验: `{PANEL_VERIFY_TLS}`\n"
-            f"Web管理台地址: `{WEB_ADMIN_URL or '未配置'}`\n\n"
+            "\n"
             "首次安装只需机器人信息，面板参数可在这里随时修改。"
         )
         kb = [
@@ -1087,19 +1082,17 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton("🔑 设置面板Token", callback_data="panelcfg_set_token")],
             [InlineKeyboardButton("🔗 设置订阅域名", callback_data="panelcfg_set_subdomain")],
             [InlineKeyboardButton("🧩 设置默认组UUID", callback_data="panelcfg_set_group")],
-            [InlineKeyboardButton("🌍 设置Web管理台地址", callback_data="panelcfg_set_webadmin")],
             [InlineKeyboardButton("🔒 切换TLS校验", callback_data="panelcfg_toggle_tls")],
             [InlineKeyboardButton("🔙 返回", callback_data="back_home")],
         ]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
         return
-    if data in {"panelcfg_set_url", "panelcfg_set_token", "panelcfg_set_subdomain", "panelcfg_set_group", "panelcfg_set_webadmin"}:
+    if data in {"panelcfg_set_url", "panelcfg_set_token", "panelcfg_set_subdomain", "panelcfg_set_group"}:
         mode_map = {
             "panelcfg_set_url": ("panelcfg_input_url", "请输入面板地址（例如 https://panel.com ）"),
             "panelcfg_set_token": ("panelcfg_input_token", "请输入面板 API Token"),
             "panelcfg_set_subdomain": ("panelcfg_input_subdomain", "请输入订阅域名（例如 https://sub.com ）"),
             "panelcfg_set_group": ("panelcfg_input_group", "请输入默认用户组 UUID"),
-            "panelcfg_set_webadmin": ("panelcfg_input_webadmin", "请输入 Telegram 内置 Web 管理台地址（例如 https://your-domain/app ）"),
         }
         key, tip = mode_map[data]
         context.user_data[key] = True
@@ -1867,12 +1860,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('panelcfg_input_group', None)
         await update.message.reply_text("✅ 默认组 UUID 已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
         return
-    if user_id == ADMIN_ID and context.user_data.get('panelcfg_input_webadmin') and text:
-        save_runtime_config(web_admin_url=text.strip())
-        context.user_data.pop('panelcfg_input_webadmin', None)
-        await update.message.reply_text("✅ Web 管理台地址已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
-        return
-
     if user_id == ADMIN_ID and context.user_data.get('edit_subscription_settings') and text:
         try:
             payload = json.loads(text)
