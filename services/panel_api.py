@@ -138,7 +138,11 @@ async def get_internal_squads(panel_url, headers, verify_tls=True):
     resp = await safe_api_request('GET', '/internal-squads', panel_url, headers, verify_tls)
     if resp and resp.status_code == 200:
         payload = extract_payload(resp)
-        return payload if isinstance(payload, list) else []
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            squads = payload.get('internalSquads')
+            return squads if isinstance(squads, list) else []
     return []
 
 
@@ -146,7 +150,11 @@ async def get_internal_squad_accessible_nodes(uuid, panel_url, headers, verify_t
     resp = await safe_api_request('GET', f'/internal-squads/{uuid}/accessible-nodes', panel_url, headers, verify_tls)
     if resp and resp.status_code == 200:
         payload = extract_payload(resp)
-        return payload if isinstance(payload, list) else []
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            nodes = payload.get('accessibleNodes')
+            return nodes if isinstance(nodes, list) else []
     return []
 
 
@@ -159,5 +167,12 @@ async def get_bandwidth_nodes_realtime(panel_url, headers, verify_tls=True):
 
 
 async def bulk_move_users_to_squad(uuids, squad_uuid, panel_url, headers, verify_tls=True):
-    payload = {'uuids': uuids, 'fields': {'externalSquadUuid': squad_uuid}}
-    return await safe_api_request('POST', '/users/bulk/update', panel_url, headers, verify_tls, json_data=payload)
+    # Remnawave API v2.6.x 推荐 /users/bulk/update-squads
+    payload = {'uuids': uuids, 'activeInternalSquads': [squad_uuid] if squad_uuid else []}
+    resp = await safe_api_request('POST', '/users/bulk/update-squads', panel_url, headers, verify_tls, json_data=payload)
+    if resp and resp.status_code in (200, 201, 204):
+        return resp
+
+    # 兼容旧版 API：退回到 legacy bulk update 字段
+    fallback_payload = {'uuids': uuids, 'fields': {'externalSquadUuid': squad_uuid}}
+    return await safe_api_request('POST', '/users/bulk/update', panel_url, headers, verify_tls, json_data=fallback_payload)
