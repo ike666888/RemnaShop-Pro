@@ -7,7 +7,7 @@ import asyncio
 import qrcode
 from io import BytesIO
 from collections import defaultdict
-from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_realtime as api_get_bandwidth_nodes_realtime, bulk_move_users_to_squad as api_bulk_move_users_to_squad, close_all_clients, extract_payload
+from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_user_by_telegram_id as api_get_user_by_telegram_id, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_realtime as api_get_bandwidth_nodes_realtime, bulk_move_users_to_squad as api_bulk_move_users_to_squad, close_all_clients, extract_payload
 from services.orders import (
     create_order,
     get_order,
@@ -30,7 +30,7 @@ from handlers.admin import format_order_detail, format_order_row, order_status_l
 from handlers.client import build_nodes_status_message
 from jobs.anomaly import build_anomaly_incidents
 from jobs.expiry import should_send_expire_notice
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -63,7 +63,6 @@ PANEL_TOKEN = config.get('panel_token', '')
 SUB_DOMAIN = (config.get('sub_domain') or '').rstrip('/')
 TARGET_GROUP_UUID = config.get('group_uuid', '')
 PANEL_VERIFY_TLS = parse_bool(config.get('panel_verify_tls', True), default=True)
-WEB_ADMIN_URL = (config.get('web_admin_url') or '').strip()
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
@@ -137,6 +136,23 @@ def db_execute(query, args=()):
     return storage_db_execute(DB_FILE, query, args=args)
 
 
+def ensure_local_subscription_sync(tg_id, panel_user):
+    if not isinstance(panel_user, dict):
+        return None
+    user_uuid = (panel_user.get('uuid') or '').strip()
+    if not user_uuid:
+        return None
+    exists = db_query("SELECT id FROM subscriptions WHERE uuid = ?", (user_uuid,), one=True)
+    if exists:
+        return user_uuid
+    now_ts = int(time.time())
+    db_execute(
+        "INSERT INTO subscriptions (tg_id, uuid, created_at) VALUES (?, ?, ?)",
+        (int(tg_id), user_uuid, now_ts),
+    )
+    return user_uuid
+
+
 def get_setting_value(key, default=None):
     row = db_query("SELECT value FROM settings WHERE key=?", (key,), one=True)
     return row['value'] if row else default
@@ -149,70 +165,54 @@ def get_setting_bool(key, default=True):
     raw = str(get_setting_value(key, "1" if default else "0")).strip().lower()
     return raw in {"1", "true", "yes", "on", "开启", "开"}
 
+def get_plan_price(plan_dict, payment_method='alipay'):
+    if payment_method == 'usdt':
+        usdt_price = (plan_dict.get('usdt_price') or '').strip()
+        if usdt_price:
+            return f"{usdt_price} USDT"
+    return str(plan_dict.get('price') or '')
+
 def resolve_payment_state(payment_method):
     alipay_enabled = get_setting_bool("alipay_enabled", True)
     wechat_enabled = get_setting_bool("wechat_enabled", True)
+    usdt_enabled = get_setting_bool("usdt_enabled", False)
     alipay_token_enabled = get_setting_bool("alipay_token_enabled", True)
     alipay_qr_enabled = get_setting_bool("alipay_qr_enabled", True)
 
-    method_label = "支付宝" if payment_method == "alipay" else "微信支付"
-    qr_key = "alipay_qr_file_id" if payment_method == "alipay" else "wechat_qr_file_id"
-    qr_file_id = get_setting_value(qr_key)
-
     if payment_method == "alipay":
+        method_label = "支付宝"
+        qr_file_id = get_setting_value("alipay_qr_file_id")
         if not alipay_enabled:
-            return {
-                'available': False,
-                'method_label': method_label,
-                'should_send_qr': False,
-                'qr_file_id': qr_file_id,
-                'pay_tip': "管理员未配置收款，请等待管理配置收款。",
-            }
+            return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "管理员未配置收款，请等待管理配置收款。"}
         if alipay_token_enabled:
-            return {
-                'available': True,
-                'method_label': method_label,
-                'should_send_qr': False,
-                'qr_file_id': qr_file_id,
-                'pay_tip': "请在下方直接发送 **支付宝口令红包**（文字）给机器人。",
-            }
+            return {'available': True, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "请在下方直接发送 **支付宝口令红包**（文字）给机器人。"}
         if alipay_qr_enabled and qr_file_id:
-            return {
-                'available': True,
-                'method_label': method_label,
-                'should_send_qr': True,
-                'qr_file_id': qr_file_id,
-                'pay_tip': "请按下方支付宝收款码完成付款后，发送 **支付截图/备注** 给机器人。",
-            }
-        return {
-            'available': False,
-            'method_label': method_label,
-            'should_send_qr': False,
-            'qr_file_id': qr_file_id,
-            'pay_tip': "管理员未配置收款，请等待管理配置收款。",
-        }
+            return {'available': True, 'method_label': method_label, 'should_send_qr': True, 'qr_file_id': qr_file_id, 'pay_tip': "请按下方支付宝收款码完成付款后，发送 **支付截图/备注** 给机器人。"}
+        return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "管理员未配置收款，请等待管理配置收款。"}
 
-    if wechat_enabled and qr_file_id:
-        return {
-            'available': True,
-            'method_label': method_label,
-            'should_send_qr': True,
-            'qr_file_id': qr_file_id,
-            'pay_tip': "请按下方微信收款码完成付款后，发送 **支付截图/备注** 给机器人。",
-        }
-    return {
-        'available': False,
-        'method_label': method_label,
-        'should_send_qr': False,
-        'qr_file_id': qr_file_id,
-        'pay_tip': "管理员未配置收款，请等待管理配置收款。",
-    }
+    if payment_method == "wechat":
+        method_label = "微信支付"
+        qr_file_id = get_setting_value("wechat_qr_file_id")
+        if wechat_enabled and qr_file_id:
+            return {'available': True, 'method_label': method_label, 'should_send_qr': True, 'qr_file_id': qr_file_id, 'pay_tip': "请按下方微信收款码完成付款后，发送 **支付截图/备注** 给机器人。"}
+        return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "管理员未配置收款，请等待管理配置收款。"}
 
+    if payment_method == "usdt":
+        method_label = "USDT"
+        network = (get_setting_value('usdt_network', 'TRC20') or 'TRC20').strip().upper()
+        address = (get_setting_value('usdt_address', '') or '').strip()
+        qr_file_id = get_setting_value('usdt_qr_file_id')
+        if usdt_enabled and address:
+            tip = f"请使用 **{network}** 网络向以下地址转账，完成后发送 **TXID/截图** 给机器人。\n`{address}`"
+            return {'available': True, 'method_label': method_label, 'should_send_qr': bool(qr_file_id), 'qr_file_id': qr_file_id, 'pay_tip': tip}
+        return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "USDT 收款未配置完成，请等待管理员配置。"}
 
+    return {'available': False, 'method_label': payment_method, 'should_send_qr': False, 'qr_file_id': None, 'pay_tip': "不支持的支付方式。"}
 def is_any_payment_available():
     ali = resolve_payment_state('alipay')['available']
     wx = resolve_payment_state('wechat')['available']
-    return ali or wx
+    usdt = resolve_payment_state('usdt')['available']
+    return ali or wx or usdt
 
 
 def get_json_setting(key, default):
@@ -313,7 +313,7 @@ def panel_config_ready():
 
 
 def save_runtime_config(**kwargs):
-    global PANEL_URL, PANEL_TOKEN, SUB_DOMAIN, TARGET_GROUP_UUID, PANEL_VERIFY_TLS, WEB_ADMIN_URL, config
+    global PANEL_URL, PANEL_TOKEN, SUB_DOMAIN, TARGET_GROUP_UUID, PANEL_VERIFY_TLS, config
     for k, v in kwargs.items():
         config[k] = v
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -328,8 +328,6 @@ def save_runtime_config(**kwargs):
         TARGET_GROUP_UUID = kwargs.get('group_uuid', '')
     if 'panel_verify_tls' in kwargs:
         PANEL_VERIFY_TLS = parse_bool(kwargs.get('panel_verify_tls'), default=True)
-    if 'web_admin_url' in kwargs:
-        WEB_ADMIN_URL = (kwargs.get('web_admin_url') or '').strip()
 
 
 init_db()
@@ -348,6 +346,10 @@ async def safe_api_request(method, endpoint, json_data=None):
 
 async def get_panel_user(uuid):
     return await api_get_panel_user(uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_user_by_telegram_id(telegram_id):
+    return await api_get_user_by_telegram_id(telegram_id, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
 
 async def get_nodes_status():
@@ -508,8 +510,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💳 收款设置", callback_data="admin_pay_settings"), InlineKeyboardButton("🔌 面板配置", callback_data="admin_panel_config")],
             [InlineKeyboardButton("🧩 模板中心", callback_data="admin_template_center"), InlineKeyboardButton("🗂 批量任务", callback_data="admin_bulk_jobs")]
         ]
-        if WEB_ADMIN_URL:
-            keyboard.append([InlineKeyboardButton("🌐 Telegram内置 Web 管理台", web_app=WebAppInfo(url=WEB_ADMIN_URL))])
     else:
         msg_text = "👋 **欢迎使用自助服务！**\n请选择操作："
         keyboard = [
@@ -730,7 +730,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             p_dict = dict(p) 
             strategy = p_dict.get('reset_strategy', 'NO_RESET')
             strategy_label = get_strategy_label(strategy)
-            btn_text = f"{p_dict['name']} | {p_dict['price']} | {p_dict['gb']}G ({strategy_label})"
+            btn_text = f"{p_dict['name']} | ¥{p_dict['price']} / {get_plan_price(p_dict, 'usdt')} | {p_dict['gb']}G ({strategy_label})"
             action = f"order_{p_dict['key']}_new_0"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
@@ -738,6 +738,12 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     elif data == "client_status":
         subs = db_query("SELECT * FROM subscriptions WHERE tg_id = ?", (user_id,))
+        if not subs:
+            panel_user = await get_user_by_telegram_id(user_id)
+            synced_uuid = ensure_local_subscription_sync(user_id, panel_user)
+            if synced_uuid:
+                append_ops_timeline('数据修复', '按TG ID自动补齐订阅映射', f'tg_id={user_id},uuid={synced_uuid}', actor='system')
+                subs = db_query("SELECT * FROM subscriptions WHERE tg_id = ?", (user_id,))
         if not subs:
             await send_or_edit_menu(update, context, "❌ 您名下没有订阅。\n请点击“购买新订阅”。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
             return
@@ -759,8 +765,21 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             btn_text = f"📦 订阅 #{valid_count} | 剩余 {remain_gb} GB"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_sub_{sid}")])
         if valid_count == 0:
-             await send_or_edit_menu(update, context, "⚠️ 您的所有订阅似乎都已失效。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
-             return
+            panel_user = await get_user_by_telegram_id(user_id)
+            synced_uuid = ensure_local_subscription_sync(user_id, panel_user)
+            if synced_uuid:
+                info = await get_panel_user(synced_uuid)
+                if info:
+                    limit = info.get('trafficLimitBytes', 0)
+                    used = info.get('userTraffic', {}).get('usedTrafficBytes', 0)
+                    remain_gb = round((limit - used) / (1024**3), 1)
+                    sid = get_short_id(synced_uuid)
+                    keyboard = [[InlineKeyboardButton(f"📦 订阅 #1 | 剩余 {remain_gb} GB", callback_data=f"view_sub_{sid}")], [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]
+                    append_ops_timeline('数据修复', '按TG ID恢复订阅入口', f'tg_id={user_id},uuid={synced_uuid}', actor='system')
+                    await send_or_edit_menu(update, context, "👤 **我的订阅列表**\n请点击下方按钮查看详情：", InlineKeyboardMarkup(keyboard))
+                    return
+            await send_or_edit_menu(update, context, "⚠️ 您的所有订阅似乎都已失效。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+            return
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
         await send_or_edit_menu(update, context, "👤 **我的订阅列表**\n请点击下方按钮查看详情：", InlineKeyboardMarkup(keyboard))
 
@@ -821,7 +840,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             p_dict = dict(p)
             strategy = p_dict.get('reset_strategy', 'NO_RESET')
             strategy_label = get_strategy_label(strategy)
-            btn_text = f"{p_dict['name']} | {p_dict['price']} | {p_dict['gb']}G ({strategy_label})"
+            btn_text = f"{p_dict['name']} | ¥{p_dict['price']} / {get_plan_price(p_dict, 'usdt')} | {p_dict['gb']}G ({strategy_label})"
             action = f"order_{p_dict['key']}_renew_{short_id}"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回列表", callback_data="client_status")])
@@ -855,6 +874,10 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await start(update, context)
 
 async def show_payment_method_menu(update, context, plan_key, order_type, short_id):
+    if payment_method == 'usdt' and not (str(plan_dict.get('usdt_price') or '').strip()):
+        await send_or_edit_menu(update, context, "⚠️ 当前套餐未配置 USDT 金额，请联系管理员。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+        return
+
     type_str = "续费" if order_type == 'renew' else "新购"
 
     if not is_any_payment_available():
@@ -869,6 +892,13 @@ async def show_payment_method_menu(update, context, plan_key, order_type, short_
         kb.append([InlineKeyboardButton("🟦 支付宝", callback_data=f"paymethod_alipay_{plan_key}_{order_type}_{short_id}")])
     if resolve_payment_state('wechat')['available']:
         kb.append([InlineKeyboardButton("🟩 微信支付", callback_data=f"paymethod_wechat_{plan_key}_{order_type}_{short_id}")])
+    if resolve_payment_state('usdt')['available'] and usdt_plan_ready:
+        kb.append([InlineKeyboardButton("🟨 USDT", callback_data=f"paymethod_usdt_{plan_key}_{order_type}_{short_id}")])
+    if not kb:
+        msg = "⚠️ 当前套餐暂无可用收款方式（USDT 需要先配置该套餐的 USDT 金额）。"
+        kb = [[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
+        return
     kb.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
     await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
 
@@ -898,10 +928,11 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
     should_send_qr = pay_state['should_send_qr']
     qr_file_id = pay_state['qr_file_id']
 
+    show_price = get_plan_price(plan_dict, payment_method)
     msg = (
         f"📝 **订单确认 ({type_str})**\n"
         f"📦 套餐：{plan_dict['name']}\n"
-        f"💰 金额：**{plan_dict['price']}**\n"
+        f"💰 金额：**{show_price}**\n"
         f"📡 流量：**{plan_dict['gb']} GB ({strategy_label})**\n"
         f"💳 支付方式：**{method_label}**\n\n"
         f"💳 **下一步：**\n{pay_tip}"
@@ -957,7 +988,7 @@ async def show_plans_menu(update, context):
     keyboard = []
     for p in plans:
         p_dict = dict(p)
-        btn_text = f"{p_dict['name']} | {p_dict['price']} | {p_dict['gb']}G"
+        btn_text = f"{p_dict['name']} | ¥{p_dict['price']} / {get_plan_price(p_dict, 'usdt')} | {p_dict['gb']}G"
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"plan_detail_{p_dict['key']}")])
     keyboard.append([InlineKeyboardButton("➕ 添加新套餐", callback_data="add_plan_start")])
     keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
@@ -1079,7 +1110,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"订阅域名: `{SUB_DOMAIN or '未配置'}`\n"
             f"默认组UUID: `{TARGET_GROUP_UUID or '未配置'}`\n"
             f"TLS校验: `{PANEL_VERIFY_TLS}`\n"
-            f"Web管理台地址: `{WEB_ADMIN_URL or '未配置'}`\n\n"
+            "\n"
             "首次安装只需机器人信息，面板参数可在这里随时修改。"
         )
         kb = [
@@ -1087,19 +1118,17 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton("🔑 设置面板Token", callback_data="panelcfg_set_token")],
             [InlineKeyboardButton("🔗 设置订阅域名", callback_data="panelcfg_set_subdomain")],
             [InlineKeyboardButton("🧩 设置默认组UUID", callback_data="panelcfg_set_group")],
-            [InlineKeyboardButton("🌍 设置Web管理台地址", callback_data="panelcfg_set_webadmin")],
             [InlineKeyboardButton("🔒 切换TLS校验", callback_data="panelcfg_toggle_tls")],
             [InlineKeyboardButton("🔙 返回", callback_data="back_home")],
         ]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
         return
-    if data in {"panelcfg_set_url", "panelcfg_set_token", "panelcfg_set_subdomain", "panelcfg_set_group", "panelcfg_set_webadmin"}:
+    if data in {"panelcfg_set_url", "panelcfg_set_token", "panelcfg_set_subdomain", "panelcfg_set_group"}:
         mode_map = {
             "panelcfg_set_url": ("panelcfg_input_url", "请输入面板地址（例如 https://panel.com ）"),
             "panelcfg_set_token": ("panelcfg_input_token", "请输入面板 API Token"),
             "panelcfg_set_subdomain": ("panelcfg_input_subdomain", "请输入订阅域名（例如 https://sub.com ）"),
             "panelcfg_set_group": ("panelcfg_input_group", "请输入默认用户组 UUID"),
-            "panelcfg_set_webadmin": ("panelcfg_input_webadmin", "请输入 Telegram 内置 Web 管理台地址（例如 https://your-domain/app ）"),
         }
         key, tip = mode_map[data]
         context.user_data[key] = True
@@ -1173,15 +1202,18 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if data == "admin_pay_settings":
         alipay_enabled = get_setting_bool("alipay_enabled", True)
         wechat_enabled = get_setting_bool("wechat_enabled", True)
+        usdt_enabled = get_setting_bool("usdt_enabled", False)
         msg = (
             "💳 **收款设置**\n"
             f"🟦 支付宝：{'已开启' if alipay_enabled else '已关闭'}\n"
-            f"🟩 微信支付：{'已开启' if wechat_enabled else '已关闭'}\n\n"
+            f"🟩 微信支付：{'已开启' if wechat_enabled else '已关闭'}\n"
+            f"🟨 USDT：{'已开启' if usdt_enabled else '已关闭'}\n\n"
             "请选择下方配置项。"
         )
         kb = [
             [InlineKeyboardButton("🟦 支付宝配置", callback_data="admin_pay_alipay_cfg")],
             [InlineKeyboardButton("🟩 微信配置", callback_data="admin_pay_wechat_cfg")],
+            [InlineKeyboardButton("🟨 USDT 配置", callback_data="admin_pay_usdt_cfg")],
             [InlineKeyboardButton("🧪 支付设置自检", callback_data="admin_pay_self_check")],
             [InlineKeyboardButton("🔙 返回", callback_data="back_home")],
         ]
@@ -1226,6 +1258,45 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
         return
 
+    if data == "admin_pay_usdt_cfg":
+        usdt_enabled = get_setting_bool("usdt_enabled", False)
+        usdt_network = (get_setting_value("usdt_network", "TRC20") or "TRC20").strip().upper()
+        usdt_address = (get_setting_value("usdt_address", "") or "").strip()
+        usdt_qr = "已上传" if get_setting_value("usdt_qr_file_id") else "未上传"
+        msg = (
+            "🟨 **USDT 配置**\n"
+            f"开关：{'开启' if usdt_enabled else '关闭'}\n"
+            f"网络：`{usdt_network}`\n"
+            f"地址：`{usdt_address or '未设置'}`\n"
+            f"收款码图片：{usdt_qr}"
+        )
+        kb = [
+            [InlineKeyboardButton("🔘 切换USDT开关", callback_data="toggle_pay_usdt")],
+            [InlineKeyboardButton("🌐 设置USDT网络", callback_data="set_pay_usdt_network")],
+            [InlineKeyboardButton("🏦 设置USDT地址", callback_data="set_pay_usdt_address")],
+            [InlineKeyboardButton("⬆️ 上传USDT收款码", callback_data="set_payimg_usdt")],
+            [InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")],
+        ]
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
+        return
+
+    if data == "toggle_pay_usdt":
+        next_val = not get_setting_bool("usdt_enabled", False)
+        set_setting_value("usdt_enabled", "1" if next_val else "0")
+        await query.answer(f"✅ USDT已{'开启' if next_val else '关闭'}", show_alert=True)
+        await send_or_edit_menu(update, context, "✅ 已更新USDT开关。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回USDT配置", callback_data="admin_pay_usdt_cfg")]]))
+        return
+
+    if data == "set_pay_usdt_network":
+        context.user_data['paycfg_input_usdt_network'] = True
+        await send_or_edit_menu(update, context, "✍️ 请输入 USDT 网络（例如 TRC20 / ERC20 / BEP20）", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_pay_usdt_cfg")]]))
+        return
+
+    if data == "set_pay_usdt_address":
+        context.user_data['paycfg_input_usdt_address'] = True
+        await send_or_edit_menu(update, context, "✍️ 请输入 USDT 收款地址", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_pay_usdt_cfg")]]))
+        return
+
     if data == "toggle_pay_alipay":
         next_val = not get_setting_bool("alipay_enabled", True)
         set_setting_value("alipay_enabled", "1" if next_val else "0")
@@ -1257,10 +1328,12 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if data == "admin_pay_self_check":
         alipay_enabled = get_setting_bool("alipay_enabled", True)
         wechat_enabled = get_setting_bool("wechat_enabled", True)
+        usdt_enabled = get_setting_bool("usdt_enabled", False)
         token_enabled = get_setting_bool("alipay_token_enabled", True)
         alipay_qr_enabled = get_setting_bool("alipay_qr_enabled", True)
         alipay_qr_ready = bool(get_setting_value("alipay_qr_file_id"))
         wechat_qr_ready = bool(get_setting_value("wechat_qr_file_id"))
+        usdt_address_ready = bool((get_setting_value("usdt_address", "") or '').strip())
 
         checks = [
             ("支付宝总开关", "✅ 开启" if alipay_enabled else "⚠️ 关闭"),
@@ -1269,6 +1342,8 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             ("支付宝收款码图片", "✅ 已上传" if alipay_qr_ready else "⚠️ 未上传"),
             ("微信支付开关", "✅ 开启" if wechat_enabled else "⚠️ 关闭"),
             ("微信收款码图片", "✅ 已上传" if wechat_qr_ready else "⚠️ 未上传"),
+            ("USDT 开关", "✅ 开启" if usdt_enabled else "⚠️ 关闭"),
+            ("USDT 地址", "✅ 已设置" if usdt_address_ready else "⚠️ 未设置"),
         ]
 
         lines = ["🧪 **支付设置自检报告**", ""]
@@ -1282,8 +1357,10 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             suggestions.append("支付宝收款码收款已开启，但未上传支付宝收款码图片。")
         if wechat_enabled and not wechat_qr_ready:
             suggestions.append("微信支付已开启，但未上传微信收款码图片。")
-        if not alipay_enabled and not wechat_enabled:
-            suggestions.append("支付宝和微信都关闭，客户端会提示管理员未配置收款。")
+        if usdt_enabled and not usdt_address_ready:
+            suggestions.append("USDT 已开启，但未设置收款地址。")
+        if not alipay_enabled and not wechat_enabled and not usdt_enabled:
+            suggestions.append("支付宝/微信/USDT 都关闭，客户端会提示管理员未配置收款。")
 
         if suggestions:
             lines.extend(["", "🔧 建议修复："])
@@ -1298,9 +1375,16 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup(kb))
         return
 
-    if data in {"set_payimg_alipay", "set_payimg_wechat"}:
-        context.user_data['set_payimg'] = 'alipay' if data.endswith('alipay') else 'wechat'
-        back_cb = "admin_pay_alipay_cfg" if data.endswith('alipay') else "admin_pay_wechat_cfg"
+    if data in {"set_payimg_alipay", "set_payimg_wechat", "set_payimg_usdt"}:
+        if data.endswith('alipay'):
+            context.user_data['set_payimg'] = 'alipay'
+            back_cb = "admin_pay_alipay_cfg"
+        elif data.endswith('wechat'):
+            context.user_data['set_payimg'] = 'wechat'
+            back_cb = "admin_pay_wechat_cfg"
+        else:
+            context.user_data['set_payimg'] = 'usdt'
+            back_cb = "admin_pay_usdt_cfg"
         await send_or_edit_menu(update, context, "📷 请发送收款二维码图片（可发送照片或图片文件）", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data=back_cb)]]))
         return
 
@@ -1652,7 +1736,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception as exc:
             logger.warning("failed to read plan strategy for %s: %s", key, exc)
             s_text = '总流量'
-        msg = f"📦 **套餐详情**\n\n🏷 名称：`{p_dict['name']}`\n💰 价格：`{p_dict['price']}`\n⏳ 时长：`{p_dict['days']} 天`\n📡 流量：`{p_dict['gb']} GB`\n🔄 策略：`{s_text}`"
+        msg = f"📦 **套餐详情**\n\n🏷 名称：`{p_dict['name']}`\n💰 人民币：`{p_dict['price']}`\n🪙 USDT：`{(p_dict.get('usdt_price') or '未设置')} USDT`\n⏳ 时长：`{p_dict['days']} 天`\n📡 流量：`{p_dict['gb']} GB`\n🔄 策略：`{s_text}`"
         keyboard = [[InlineKeyboardButton("🗑 删除此套餐", callback_data=f"del_plan_{key}")], [InlineKeyboardButton("🔙 返回列表", callback_data="admin_plans_list")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
     elif data.startswith("del_plan_"):
@@ -1792,7 +1876,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         strategy = data.replace("set_strategy_", "")
         new_plan = context.user_data['new_plan']
         key = f"p{int(time.time())}"
-        db_execute("INSERT INTO plans VALUES (?, ?, ?, ?, ?, ?)", (key, new_plan['name'], new_plan['price'], new_plan['days'], new_plan['gb'], strategy))
+        db_execute("INSERT INTO plans (key, name, price, usdt_price, days, gb, reset_strategy) VALUES (?, ?, ?, ?, ?, ?, ?)", (key, new_plan['name'], new_plan['price'], new_plan['usdt_price'], new_plan['days'], new_plan['gb'], strategy))
         del context.user_data['add_plan_step']
         await send_or_edit_menu(update, context, f"✅ **套餐添加成功！**\n{new_plan['name']} - {strategy}", None)
         await asyncio.sleep(1)
@@ -1825,11 +1909,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not file_id:
             await update.message.reply_text("❌ 请发送图片文件", reply_markup=cancel_kb)
             return
-        key = 'alipay_qr_file_id' if pay_type == 'alipay' else 'wechat_qr_file_id'
+        key_map = {'alipay': 'alipay_qr_file_id', 'wechat': 'wechat_qr_file_id', 'usdt': 'usdt_qr_file_id'}
+        key = key_map.get(pay_type, 'wechat_qr_file_id')
         set_setting_value(key, file_id)
         context.user_data.pop('set_payimg', None)
-        label = '支付宝' if pay_type == 'alipay' else '微信支付'
-        await update.message.reply_text(f"✅ 已更新{label}收款码。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_pay_alipay_cfg" if pay_type == "alipay" else "admin_pay_wechat_cfg")]]))
+        label_map = {'alipay': '支付宝', 'wechat': '微信支付', 'usdt': 'USDT'}
+        back_map = {'alipay': 'admin_pay_alipay_cfg', 'wechat': 'admin_pay_wechat_cfg', 'usdt': 'admin_pay_usdt_cfg'}
+        label = label_map.get(pay_type, '收款')
+        await update.message.reply_text(f"✅ 已更新{label}收款码。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data=back_map.get(pay_type, 'admin_pay_settings'))]]))
+        return
+
+    if user_id == ADMIN_ID and context.user_data.get('paycfg_input_usdt_network') and text:
+        set_setting_value('usdt_network', text.strip().upper()[:12])
+        context.user_data.pop('paycfg_input_usdt_network', None)
+        await update.message.reply_text("✅ USDT 网络已更新。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_pay_usdt_cfg")]]))
+        return
+
+    if user_id == ADMIN_ID and context.user_data.get('paycfg_input_usdt_address') and text:
+        set_setting_value('usdt_address', text.strip())
+        context.user_data.pop('paycfg_input_usdt_address', None)
+        await update.message.reply_text("✅ USDT 地址已更新。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_pay_usdt_cfg")]]))
         return
 
     if user_id == ADMIN_ID and context.user_data.get('broadcast_mode'):
@@ -1867,12 +1966,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('panelcfg_input_group', None)
         await update.message.reply_text("✅ 默认组 UUID 已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
         return
-    if user_id == ADMIN_ID and context.user_data.get('panelcfg_input_webadmin') and text:
-        save_runtime_config(web_admin_url=text.strip())
-        context.user_data.pop('panelcfg_input_webadmin', None)
-        await update.message.reply_text("✅ Web 管理台地址已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
-        return
-
     if user_id == ADMIN_ID and context.user_data.get('edit_subscription_settings') and text:
         try:
             payload = json.loads(text)
@@ -2056,21 +2149,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if step == 'name':
             context.user_data['new_plan'] = {'name': text}
             context.user_data['add_plan_step'] = 'price'
-            await update.message.reply_text("📝 **步骤 2/5：请输入价格**\n(例如: 200元)", reply_markup=cancel_kb, parse_mode='Markdown')
+            await update.message.reply_text("📝 **步骤 2/6：请输入人民币价格**\n(例如: 200元)", reply_markup=cancel_kb, parse_mode='Markdown')
         elif step == 'price':
             context.user_data['new_plan']['price'] = text
+            context.user_data['add_plan_step'] = 'usdt_price'
+            await update.message.reply_text("🪙 **步骤 3/6：请输入 USDT 价格**\n(例如: 28)", reply_markup=cancel_kb, parse_mode='Markdown')
+        elif step == 'usdt_price':
+            if not text or not text.strip():
+                return await update.message.reply_text("❌ USDT 价格不能为空", reply_markup=cancel_kb)
+            context.user_data['new_plan']['usdt_price'] = text.strip()
             context.user_data['add_plan_step'] = 'days'
-            await update.message.reply_text("📅 **步骤 3/5：请输入有效期天数**\n(请输入纯数字，例如: 30)", reply_markup=cancel_kb, parse_mode='Markdown')
+            await update.message.reply_text("📅 **步骤 4/6：请输入有效期天数**\n(请输入纯数字，例如: 30)", reply_markup=cancel_kb, parse_mode='Markdown')
         elif step == 'days':
             if not text.isdigit(): return await update.message.reply_text("❌ 请输入数字", reply_markup=cancel_kb)
             context.user_data['new_plan']['days'] = int(text)
             context.user_data['add_plan_step'] = 'gb'
-            await update.message.reply_text("📡 **步骤 4/5：请输入流量限制 GB**\n(请输入纯数字，例如: 100)", reply_markup=cancel_kb, parse_mode='Markdown')
+            await update.message.reply_text("📡 **步骤 5/6：请输入流量限制 GB**\n(请输入纯数字，例如: 100)", reply_markup=cancel_kb, parse_mode='Markdown')
         elif step == 'gb':
             if not text.isdigit(): return await update.message.reply_text("❌ 请输入数字", reply_markup=cancel_kb)
             context.user_data['new_plan']['gb'] = int(text)
             keyboard = [[InlineKeyboardButton("🚫 永不重置", callback_data="set_strategy_NO_RESET")], [InlineKeyboardButton("📅 每日重置", callback_data="set_strategy_DAY")], [InlineKeyboardButton("🗓 每周重置", callback_data="set_strategy_WEEK")], [InlineKeyboardButton("🌝 每月重置", callback_data="set_strategy_MONTH")], [InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]]
-            await update.message.reply_text("🔄 **步骤 5/5：请选择流量重置策略**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            await update.message.reply_text("🔄 **步骤 6/6：请选择流量重置策略**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         return
     if user_id in temp_orders and text:
         order = temp_orders[user_id]
@@ -2094,7 +2193,7 @@ async def add_plan_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data['add_plan_step'] = 'name'
-    await query.edit_message_text("📝 **步骤 1/5：开始添加套餐**\n\n请输入套餐名称:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]]), parse_mode='Markdown')
+    await query.edit_message_text("📝 **步骤 1/6：开始添加套餐**\n\n请输入套餐名称:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]]), parse_mode='Markdown')
 
 async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
