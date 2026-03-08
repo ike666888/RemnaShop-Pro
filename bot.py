@@ -1895,6 +1895,9 @@ async def show_users_list(update, context):
     await send_or_edit_menu(update, context, "👥 **用户管理 (最近20名)**\n点击ID查看其名下订阅：", InlineKeyboardMarkup(keyboard))
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_user:
+        logger.debug("skip message update without effective_user or message")
+        return
     user_id = update.effective_user.id
     text = update.message.text
     cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]])
@@ -2631,6 +2634,7 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^reset_traffic_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^set_strategy_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^set_payimg_"))
+    app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^set_pay_usdt_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^toggle_pay_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^reply_user_")) 
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^set_anomaly_"))
@@ -2666,5 +2670,5 @@ if __name__ == '__main__':
     except Exception as exc:
         logger.warning("Failed to reschedule anomaly job at startup: %s", exc)
 
-    print(f"🚀 RemnaShop-Pro V3.5 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro V3.6 已启动 | 监听中...")
     app.run_polling()
