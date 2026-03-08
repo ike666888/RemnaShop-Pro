@@ -98,6 +98,14 @@ async def get_panel_user(uuid, panel_url, headers, verify_tls=True):
     return None
 
 
+async def get_user_by_telegram_id(telegram_id, panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', f"/users/by-telegram-id/{telegram_id}", panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
 async def get_nodes_status(panel_url, headers, verify_tls=True):
     resp = await safe_api_request('GET', '/nodes', panel_url, headers, verify_tls)
     if resp and resp.status_code == 200:

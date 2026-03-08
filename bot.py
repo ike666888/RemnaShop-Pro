@@ -7,7 +7,7 @@ import asyncio
 import qrcode
 from io import BytesIO
 from collections import defaultdict
-from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_realtime as api_get_bandwidth_nodes_realtime, bulk_move_users_to_squad as api_bulk_move_users_to_squad, close_all_clients, extract_payload
+from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_user_by_telegram_id as api_get_user_by_telegram_id, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_realtime as api_get_bandwidth_nodes_realtime, bulk_move_users_to_squad as api_bulk_move_users_to_squad, close_all_clients, extract_payload
 from services.orders import (
     create_order,
     get_order,
@@ -134,6 +134,23 @@ def db_query(query, args=(), one=False):
 
 def db_execute(query, args=()):
     return storage_db_execute(DB_FILE, query, args=args)
+
+
+def ensure_local_subscription_sync(tg_id, panel_user):
+    if not isinstance(panel_user, dict):
+        return None
+    user_uuid = (panel_user.get('uuid') or '').strip()
+    if not user_uuid:
+        return None
+    exists = db_query("SELECT id FROM subscriptions WHERE uuid = ?", (user_uuid,), one=True)
+    if exists:
+        return user_uuid
+    now_ts = int(time.time())
+    db_execute(
+        "INSERT INTO subscriptions (tg_id, uuid, created_at) VALUES (?, ?, ?)",
+        (int(tg_id), user_uuid, now_ts),
+    )
+    return user_uuid
 
 
 def get_setting_value(key, default=None):
@@ -345,6 +362,10 @@ async def safe_api_request(method, endpoint, json_data=None):
 
 async def get_panel_user(uuid):
     return await api_get_panel_user(uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_user_by_telegram_id(telegram_id):
+    return await api_get_user_by_telegram_id(telegram_id, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
 
 async def get_nodes_status():
@@ -734,6 +755,12 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif data == "client_status":
         subs = db_query("SELECT * FROM subscriptions WHERE tg_id = ?", (user_id,))
         if not subs:
+            panel_user = await get_user_by_telegram_id(user_id)
+            synced_uuid = ensure_local_subscription_sync(user_id, panel_user)
+            if synced_uuid:
+                append_ops_timeline('数据修复', '按TG ID自动补齐订阅映射', f'tg_id={user_id},uuid={synced_uuid}', actor='system')
+                subs = db_query("SELECT * FROM subscriptions WHERE tg_id = ?", (user_id,))
+        if not subs:
             await send_or_edit_menu(update, context, "❌ 您名下没有订阅。\n请点击“购买新订阅”。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
             return
         try: await query.edit_message_text("🔄 正在加载订阅列表...")
@@ -754,8 +781,21 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             btn_text = f"📦 订阅 #{valid_count} | 剩余 {remain_gb} GB"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_sub_{sid}")])
         if valid_count == 0:
-             await send_or_edit_menu(update, context, "⚠️ 您的所有订阅似乎都已失效。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
-             return
+            panel_user = await get_user_by_telegram_id(user_id)
+            synced_uuid = ensure_local_subscription_sync(user_id, panel_user)
+            if synced_uuid:
+                info = await get_panel_user(synced_uuid)
+                if info:
+                    limit = info.get('trafficLimitBytes', 0)
+                    used = info.get('userTraffic', {}).get('usedTrafficBytes', 0)
+                    remain_gb = round((limit - used) / (1024**3), 1)
+                    sid = get_short_id(synced_uuid)
+                    keyboard = [[InlineKeyboardButton(f"📦 订阅 #1 | 剩余 {remain_gb} GB", callback_data=f"view_sub_{sid}")], [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]
+                    append_ops_timeline('数据修复', '按TG ID恢复订阅入口', f'tg_id={user_id},uuid={synced_uuid}', actor='system')
+                    await send_or_edit_menu(update, context, "👤 **我的订阅列表**\n请点击下方按钮查看详情：", InlineKeyboardMarkup(keyboard))
+                    return
+            await send_or_edit_menu(update, context, "⚠️ 您的所有订阅似乎都已失效。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+            return
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
         await send_or_edit_menu(update, context, "👤 **我的订阅列表**\n请点击下方按钮查看详情：", InlineKeyboardMarkup(keyboard))
 
