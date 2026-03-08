@@ -13,7 +13,7 @@ def _connect(db_file: str) -> sqlite3.Connection:
 def init_db(db_file: str) -> None:
     conn = _connect(db_file)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS plans (key TEXT PRIMARY KEY, name TEXT, price TEXT, days INTEGER, gb INTEGER, reset_strategy TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS plans (key TEXT PRIMARY KEY, name TEXT, price TEXT, usdt_price TEXT, days INTEGER, gb INTEGER, reset_strategy TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, uuid TEXT, created_at TIMESTAMP)''')
     try:
         c.execute("ALTER TABLE subscriptions ADD COLUMN plan_key TEXT")
@@ -36,6 +36,11 @@ def init_db(db_file: str) -> None:
         pass
     try:
         c.execute("ALTER TABLE plans ADD COLUMN reset_strategy TEXT DEFAULT 'NO_RESET'")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        c.execute("ALTER TABLE plans ADD COLUMN usdt_price TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass
 
@@ -134,8 +139,8 @@ def init_db(db_file: str) -> None:
 
     c.execute("SELECT count(*) FROM plans")
     if c.fetchone()[0] == 0:
-        c.execute("INSERT INTO plans VALUES (?, ?, ?, ?, ?, ?)", ('p1', '1个月', '200元', 30, 100, 'NO_RESET'))
-        c.execute("INSERT INTO plans VALUES (?, ?, ?, ?, ?, ?)", ('p2', '3个月', '580元', 90, 500, 'NO_RESET'))
+        c.execute("INSERT INTO plans (key, name, price, usdt_price, days, gb, reset_strategy) VALUES (?, ?, ?, ?, ?, ?, ?)", ('p1', '1个月', '200元', '28', 30, 100, 'NO_RESET'))
+        c.execute("INSERT INTO plans (key, name, price, usdt_price, days, gb, reset_strategy) VALUES (?, ?, ?, ?, ?, ?, ?)", ('p2', '3个月', '580元', '82', 90, 500, 'NO_RESET'))
 
     conn.commit()
     conn.close()
