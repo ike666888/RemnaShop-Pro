@@ -7,7 +7,7 @@ import asyncio
 import qrcode
 from io import BytesIO
 from collections import defaultdict
-from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_realtime as api_get_bandwidth_nodes_realtime, bulk_move_users_to_squad as api_bulk_move_users_to_squad, close_all_clients, extract_payload
+from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_user_by_telegram_id as api_get_user_by_telegram_id, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_realtime as api_get_bandwidth_nodes_realtime, bulk_move_users_to_squad as api_bulk_move_users_to_squad, close_all_clients, extract_payload
 from services.orders import (
     create_order,
     get_order,
@@ -30,7 +30,7 @@ from handlers.admin import format_order_detail, format_order_row, order_status_l
 from handlers.client import build_nodes_status_message
 from jobs.anomaly import build_anomaly_incidents
 from jobs.expiry import should_send_expire_notice
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -63,7 +63,6 @@ PANEL_TOKEN = config.get('panel_token', '')
 SUB_DOMAIN = (config.get('sub_domain') or '').rstrip('/')
 TARGET_GROUP_UUID = config.get('group_uuid', '')
 PANEL_VERIFY_TLS = parse_bool(config.get('panel_verify_tls', True), default=True)
-WEB_ADMIN_URL = (config.get('web_admin_url') or '').strip()
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
@@ -135,6 +134,23 @@ def db_query(query, args=(), one=False):
 
 def db_execute(query, args=()):
     return storage_db_execute(DB_FILE, query, args=args)
+
+
+def ensure_local_subscription_sync(tg_id, panel_user):
+    if not isinstance(panel_user, dict):
+        return None
+    user_uuid = (panel_user.get('uuid') or '').strip()
+    if not user_uuid:
+        return None
+    exists = db_query("SELECT id FROM subscriptions WHERE uuid = ?", (user_uuid,), one=True)
+    if exists:
+        return user_uuid
+    now_ts = int(time.time())
+    db_execute(
+        "INSERT INTO subscriptions (tg_id, uuid, created_at) VALUES (?, ?, ?)",
+        (int(tg_id), user_uuid, now_ts),
+    )
+    return user_uuid
 
 
 def get_setting_value(key, default=None):
@@ -313,7 +329,7 @@ def panel_config_ready():
 
 
 def save_runtime_config(**kwargs):
-    global PANEL_URL, PANEL_TOKEN, SUB_DOMAIN, TARGET_GROUP_UUID, PANEL_VERIFY_TLS, WEB_ADMIN_URL, config
+    global PANEL_URL, PANEL_TOKEN, SUB_DOMAIN, TARGET_GROUP_UUID, PANEL_VERIFY_TLS, config
     for k, v in kwargs.items():
         config[k] = v
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -328,8 +344,6 @@ def save_runtime_config(**kwargs):
         TARGET_GROUP_UUID = kwargs.get('group_uuid', '')
     if 'panel_verify_tls' in kwargs:
         PANEL_VERIFY_TLS = parse_bool(kwargs.get('panel_verify_tls'), default=True)
-    if 'web_admin_url' in kwargs:
-        WEB_ADMIN_URL = (kwargs.get('web_admin_url') or '').strip()
 
 
 init_db()
@@ -348,6 +362,10 @@ async def safe_api_request(method, endpoint, json_data=None):
 
 async def get_panel_user(uuid):
     return await api_get_panel_user(uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_user_by_telegram_id(telegram_id):
+    return await api_get_user_by_telegram_id(telegram_id, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
 
 async def get_nodes_status():
@@ -508,8 +526,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💳 收款设置", callback_data="admin_pay_settings"), InlineKeyboardButton("🔌 面板配置", callback_data="admin_panel_config")],
             [InlineKeyboardButton("🧩 模板中心", callback_data="admin_template_center"), InlineKeyboardButton("🗂 批量任务", callback_data="admin_bulk_jobs")]
         ]
-        if WEB_ADMIN_URL:
-            keyboard.append([InlineKeyboardButton("🌐 Telegram内置 Web 管理台", web_app=WebAppInfo(url=WEB_ADMIN_URL))])
     else:
         msg_text = "👋 **欢迎使用自助服务！**\n请选择操作："
         keyboard = [
@@ -739,6 +755,12 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif data == "client_status":
         subs = db_query("SELECT * FROM subscriptions WHERE tg_id = ?", (user_id,))
         if not subs:
+            panel_user = await get_user_by_telegram_id(user_id)
+            synced_uuid = ensure_local_subscription_sync(user_id, panel_user)
+            if synced_uuid:
+                append_ops_timeline('数据修复', '按TG ID自动补齐订阅映射', f'tg_id={user_id},uuid={synced_uuid}', actor='system')
+                subs = db_query("SELECT * FROM subscriptions WHERE tg_id = ?", (user_id,))
+        if not subs:
             await send_or_edit_menu(update, context, "❌ 您名下没有订阅。\n请点击“购买新订阅”。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
             return
         try: await query.edit_message_text("🔄 正在加载订阅列表...")
@@ -759,8 +781,21 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             btn_text = f"📦 订阅 #{valid_count} | 剩余 {remain_gb} GB"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_sub_{sid}")])
         if valid_count == 0:
-             await send_or_edit_menu(update, context, "⚠️ 您的所有订阅似乎都已失效。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
-             return
+            panel_user = await get_user_by_telegram_id(user_id)
+            synced_uuid = ensure_local_subscription_sync(user_id, panel_user)
+            if synced_uuid:
+                info = await get_panel_user(synced_uuid)
+                if info:
+                    limit = info.get('trafficLimitBytes', 0)
+                    used = info.get('userTraffic', {}).get('usedTrafficBytes', 0)
+                    remain_gb = round((limit - used) / (1024**3), 1)
+                    sid = get_short_id(synced_uuid)
+                    keyboard = [[InlineKeyboardButton(f"📦 订阅 #1 | 剩余 {remain_gb} GB", callback_data=f"view_sub_{sid}")], [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]
+                    append_ops_timeline('数据修复', '按TG ID恢复订阅入口', f'tg_id={user_id},uuid={synced_uuid}', actor='system')
+                    await send_or_edit_menu(update, context, "👤 **我的订阅列表**\n请点击下方按钮查看详情：", InlineKeyboardMarkup(keyboard))
+                    return
+            await send_or_edit_menu(update, context, "⚠️ 您的所有订阅似乎都已失效。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+            return
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
         await send_or_edit_menu(update, context, "👤 **我的订阅列表**\n请点击下方按钮查看详情：", InlineKeyboardMarkup(keyboard))
 
@@ -1079,7 +1114,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"订阅域名: `{SUB_DOMAIN or '未配置'}`\n"
             f"默认组UUID: `{TARGET_GROUP_UUID or '未配置'}`\n"
             f"TLS校验: `{PANEL_VERIFY_TLS}`\n"
-            f"Web管理台地址: `{WEB_ADMIN_URL or '未配置'}`\n\n"
+            "\n"
             "首次安装只需机器人信息，面板参数可在这里随时修改。"
         )
         kb = [
@@ -1087,19 +1122,17 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton("🔑 设置面板Token", callback_data="panelcfg_set_token")],
             [InlineKeyboardButton("🔗 设置订阅域名", callback_data="panelcfg_set_subdomain")],
             [InlineKeyboardButton("🧩 设置默认组UUID", callback_data="panelcfg_set_group")],
-            [InlineKeyboardButton("🌍 设置Web管理台地址", callback_data="panelcfg_set_webadmin")],
             [InlineKeyboardButton("🔒 切换TLS校验", callback_data="panelcfg_toggle_tls")],
             [InlineKeyboardButton("🔙 返回", callback_data="back_home")],
         ]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
         return
-    if data in {"panelcfg_set_url", "panelcfg_set_token", "panelcfg_set_subdomain", "panelcfg_set_group", "panelcfg_set_webadmin"}:
+    if data in {"panelcfg_set_url", "panelcfg_set_token", "panelcfg_set_subdomain", "panelcfg_set_group"}:
         mode_map = {
             "panelcfg_set_url": ("panelcfg_input_url", "请输入面板地址（例如 https://panel.com ）"),
             "panelcfg_set_token": ("panelcfg_input_token", "请输入面板 API Token"),
             "panelcfg_set_subdomain": ("panelcfg_input_subdomain", "请输入订阅域名（例如 https://sub.com ）"),
             "panelcfg_set_group": ("panelcfg_input_group", "请输入默认用户组 UUID"),
-            "panelcfg_set_webadmin": ("panelcfg_input_webadmin", "请输入 Telegram 内置 Web 管理台地址（例如 https://your-domain/app ）"),
         }
         key, tip = mode_map[data]
         context.user_data[key] = True
@@ -1867,12 +1900,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('panelcfg_input_group', None)
         await update.message.reply_text("✅ 默认组 UUID 已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
         return
-    if user_id == ADMIN_ID and context.user_data.get('panelcfg_input_webadmin') and text:
-        save_runtime_config(web_admin_url=text.strip())
-        context.user_data.pop('panelcfg_input_webadmin', None)
-        await update.message.reply_text("✅ Web 管理台地址已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
-        return
-
     if user_id == ADMIN_ID and context.user_data.get('edit_subscription_settings') and text:
         try:
             payload = json.loads(text)
