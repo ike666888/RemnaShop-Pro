@@ -206,6 +206,7 @@ install_docker_compose() {
 
 prepare_repo() {
   log "正在准备仓库目录：${INSTALL_DIR}"
+  log "说明：安装目录会保留完整 git 仓库（含 docs/tests/README 等文件）；这些文件是否进入生产镜像由 Dockerfile + .dockerignore 决定。"
 
   if [ -d "${INSTALL_DIR}/.git" ]; then
     log "检测到已有 git 仓库，正在更新..."
