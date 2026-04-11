@@ -631,17 +631,34 @@ def detect_bandwidth_volatility(nodes_rt):
     return alerts
 
 
-async def send_or_edit_menu(update, context, text, reply_markup):
+async def send_or_edit_menu(update, context, text, reply_markup, parse_mode='Markdown'):
+    async def _safe_send(chat_id, body, markup, mode):
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=body, reply_markup=markup, parse_mode=mode)
+        except Exception as exc:
+            if mode is not None:
+                logger.warning("send_message failed with parse_mode=%s, fallback plain text: %s", mode, exc)
+                await context.bot.send_message(chat_id=chat_id, text=body, reply_markup=markup)
+            else:
+                raise
+
     if update.callback_query:
         try:
-            await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode='Markdown')
-        except Exception:
+            await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except Exception as exc:
+            if parse_mode is not None:
+                logger.warning("edit_message_text failed with parse_mode=%s, fallback plain text: %s", parse_mode, exc)
+                try:
+                    await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup)
+                    return
+                except Exception:
+                    pass
             try: await update.callback_query.delete_message()
             except Exception as exc:
                 logger.debug("delete callback message failed: %s", exc)
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='Markdown')
+            await _safe_send(update.effective_chat.id, text, reply_markup, parse_mode)
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='Markdown')
+        await _safe_send(update.effective_chat.id, text, reply_markup, parse_mode)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
@@ -1354,19 +1371,14 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         return
     if data == "admin_pay_settings":
-        alipay_enabled = get_setting_bool("alipay_enabled", True)
-        wechat_enabled = get_setting_bool("wechat_enabled", True)
         usdt_enabled = get_setting_bool("usdt_enabled", False)
         msg = (
             "💳 **收款设置**\n"
-            f"🟦 支付宝：{'已开启' if alipay_enabled else '已关闭'}\n"
-            f"🟩 微信支付：{'已开启' if wechat_enabled else '已关闭'}\n"
+            "🧾 人工审核：始终可用（用户提交凭证后人工审核）\n"
             f"🟨 USDT：{'已开启' if usdt_enabled else '已关闭'}\n\n"
             "请选择下方配置项。"
         )
         kb = [
-            [InlineKeyboardButton("🟦 支付宝配置", callback_data="admin_pay_alipay_cfg")],
-            [InlineKeyboardButton("🟩 微信配置", callback_data="admin_pay_wechat_cfg")],
             [InlineKeyboardButton("🟨 USDT 配置", callback_data="admin_pay_usdt_cfg")],
             [InlineKeyboardButton("🧪 支付设置自检", callback_data="admin_pay_self_check")],
             [InlineKeyboardButton("🔙 返回", callback_data="back_home")],
@@ -1375,41 +1387,11 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if data == "admin_pay_alipay_cfg":
-        alipay_enabled = get_setting_bool("alipay_enabled", True)
-        token_enabled = get_setting_bool("alipay_token_enabled", True)
-        qr_enabled = get_setting_bool("alipay_qr_enabled", True)
-        ali_qr = "已上传" if get_setting_value("alipay_qr_file_id") else "未上传"
-        msg = (
-            "🟦 **支付宝配置**\n"
-            f"总开关：{'开启' if alipay_enabled else '关闭'}\n"
-            f"口令收款：{'开启' if token_enabled else '关闭'}\n"
-            f"收款码收款：{'开启' if qr_enabled else '关闭'}\n"
-            f"收款码图片：{ali_qr}"
-        )
-        kb = [
-            [InlineKeyboardButton("🔘 切换支付宝总开关", callback_data="toggle_pay_alipay")],
-            [InlineKeyboardButton("🔤 切换口令收款", callback_data="toggle_pay_alipay_token")],
-            [InlineKeyboardButton("🖼 切换收款码收款", callback_data="toggle_pay_alipay_qr")],
-            [InlineKeyboardButton("⬆️ 上传支付宝收款码", callback_data="set_payimg_alipay")],
-            [InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")],
-        ]
-        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
+        await send_or_edit_menu(update, context, "⚠️ 支付宝配置已下线，当前仅保留：人工审核 + USDT。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
         return
 
     if data == "admin_pay_wechat_cfg":
-        wechat_enabled = get_setting_bool("wechat_enabled", True)
-        wx_qr = "已上传" if get_setting_value("wechat_qr_file_id") else "未上传"
-        msg = (
-            "🟩 **微信配置**\n"
-            f"微信支付开关：{'开启' if wechat_enabled else '关闭'}\n"
-            f"收款码图片：{wx_qr}"
-        )
-        kb = [
-            [InlineKeyboardButton("🔘 切换微信支付开关", callback_data="toggle_pay_wechat")],
-            [InlineKeyboardButton("⬆️ 上传微信收款码", callback_data="set_payimg_wechat")],
-            [InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")],
-        ]
-        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
+        await send_or_edit_menu(update, context, "⚠️ 微信配置已下线，当前仅保留：人工审核 + USDT。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
         return
 
     if data == "admin_pay_usdt_cfg":
@@ -1452,50 +1434,27 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if data == "toggle_pay_alipay":
-        next_val = not get_setting_bool("alipay_enabled", True)
-        set_setting_value("alipay_enabled", "1" if next_val else "0")
-        await query.answer(f"✅ 支付宝已{'开启' if next_val else '关闭'}", show_alert=True)
-        await send_or_edit_menu(update, context, "✅ 已更新支付宝总开关。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回支付宝配置", callback_data="admin_pay_alipay_cfg")]]))
+        await send_or_edit_menu(update, context, "⚠️ 支付宝配置已下线。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
         return
 
     if data == "toggle_pay_alipay_token":
-        next_val = not get_setting_bool("alipay_token_enabled", True)
-        set_setting_value("alipay_token_enabled", "1" if next_val else "0")
-        await query.answer(f"✅ 口令收款已{'开启' if next_val else '关闭'}", show_alert=True)
-        await send_or_edit_menu(update, context, "✅ 已更新支付宝口令收款开关。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回支付宝配置", callback_data="admin_pay_alipay_cfg")]]))
+        await send_or_edit_menu(update, context, "⚠️ 支付宝配置已下线。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
         return
 
     if data == "toggle_pay_alipay_qr":
-        next_val = not get_setting_bool("alipay_qr_enabled", True)
-        set_setting_value("alipay_qr_enabled", "1" if next_val else "0")
-        await query.answer(f"✅ 收款码收款已{'开启' if next_val else '关闭'}", show_alert=True)
-        await send_or_edit_menu(update, context, "✅ 已更新支付宝收款码收款开关。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回支付宝配置", callback_data="admin_pay_alipay_cfg")]]))
+        await send_or_edit_menu(update, context, "⚠️ 支付宝配置已下线。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
         return
 
     if data == "toggle_pay_wechat":
-        next_val = not get_setting_bool("wechat_enabled", True)
-        set_setting_value("wechat_enabled", "1" if next_val else "0")
-        await query.answer(f"✅ 微信支付已{'开启' if next_val else '关闭'}", show_alert=True)
-        await send_or_edit_menu(update, context, "✅ 已更新微信支付开关。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回微信配置", callback_data="admin_pay_wechat_cfg")]]))
+        await send_or_edit_menu(update, context, "⚠️ 微信配置已下线。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
         return
 
     if data == "admin_pay_self_check":
-        alipay_enabled = get_setting_bool("alipay_enabled", True)
-        wechat_enabled = get_setting_bool("wechat_enabled", True)
         usdt_enabled = get_setting_bool("usdt_enabled", False)
-        token_enabled = get_setting_bool("alipay_token_enabled", True)
-        alipay_qr_enabled = get_setting_bool("alipay_qr_enabled", True)
-        alipay_qr_ready = bool(get_setting_value("alipay_qr_file_id"))
-        wechat_qr_ready = bool(get_setting_value("wechat_qr_file_id"))
         usdt_address_ready = bool((get_setting_value("usdt_address", "") or '').strip())
 
         checks = [
-            ("支付宝总开关", "✅ 开启" if alipay_enabled else "⚠️ 关闭"),
-            ("支付宝口令收款", "✅ 开启" if token_enabled else "⚠️ 关闭"),
-            ("支付宝收款码收款", "✅ 开启" if alipay_qr_enabled else "⚠️ 关闭"),
-            ("支付宝收款码图片", "✅ 已上传" if alipay_qr_ready else "⚠️ 未上传"),
-            ("微信支付开关", "✅ 开启" if wechat_enabled else "⚠️ 关闭"),
-            ("微信收款码图片", "✅ 已上传" if wechat_qr_ready else "⚠️ 未上传"),
+            ("人工审核路径", "✅ 可用（无需额外配置）"),
             ("USDT 开关", "✅ 开启" if usdt_enabled else "⚠️ 关闭"),
             ("USDT 地址", "✅ 已设置" if usdt_address_ready else "⚠️ 未设置"),
         ]
@@ -1505,16 +1464,10 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             lines.append(f"• {name}：{result}")
 
         suggestions = []
-        if alipay_enabled and not token_enabled and not alipay_qr_enabled:
-            suggestions.append("支付宝已开启，但口令收款和收款码收款都关闭，用户将无法支付。")
-        if alipay_enabled and alipay_qr_enabled and not alipay_qr_ready:
-            suggestions.append("支付宝收款码收款已开启，但未上传支付宝收款码图片。")
-        if wechat_enabled and not wechat_qr_ready:
-            suggestions.append("微信支付已开启，但未上传微信收款码图片。")
         if usdt_enabled and not usdt_address_ready:
             suggestions.append("USDT 已开启，但未设置收款地址。")
-        if not alipay_enabled and not wechat_enabled and not usdt_enabled:
-            suggestions.append("支付宝/微信/USDT 都关闭，客户端会提示管理员未配置收款。")
+        if not usdt_enabled:
+            suggestions.append("USDT 未开启；客户端将仅显示人工审核路径。")
 
         if suggestions:
             lines.extend(["", "🔧 建议修复："])
@@ -1530,12 +1483,9 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if data in {"set_payimg_alipay", "set_payimg_wechat", "set_payimg_usdt"}:
-        if data.endswith('alipay'):
-            context.user_data['set_payimg'] = 'alipay'
-            back_cb = "admin_pay_alipay_cfg"
-        elif data.endswith('wechat'):
-            context.user_data['set_payimg'] = 'wechat'
-            back_cb = "admin_pay_wechat_cfg"
+        if data.endswith('alipay') or data.endswith('wechat'):
+            await send_or_edit_menu(update, context, "⚠️ 支付宝/微信配置已下线。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
+            return
         else:
             context.user_data['set_payimg'] = 'usdt'
             back_cb = "admin_pay_usdt_cfg"
@@ -2032,9 +1982,17 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         key = f"p{int(time.time())}"
         db_execute("INSERT INTO plans (key, name, price, usdt_price, days, gb, reset_strategy) VALUES (?, ?, ?, ?, ?, ?, ?)", (key, new_plan['name'], new_plan['price'], new_plan['usdt_price'], new_plan['days'], new_plan['gb'], strategy))
         del context.user_data['add_plan_step']
-        await send_or_edit_menu(update, context, f"✅ **套餐添加成功！**\n{new_plan['name']} - {strategy}", None)
-        await asyncio.sleep(1)
-        await show_plans_menu(update, context)
+        strategy_label = get_strategy_label(strategy)
+        msg = (
+            "✅ 套餐添加成功！\n"
+            f"套餐名称：{new_plan['name']}\n"
+            f"重置策略：{strategy_label} ({strategy})"
+        )
+        kb = [
+            [InlineKeyboardButton("📦 返回套餐管理", callback_data="admin_plans_list")],
+            [InlineKeyboardButton("🏠 返回主菜单", callback_data="back_home")],
+        ]
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb), parse_mode=None)
 
 async def show_users_list(update, context):
     users = db_query("SELECT DISTINCT tg_id, MAX(created_at) as created_at FROM subscriptions GROUP BY tg_id ORDER BY created_at DESC LIMIT 20")
@@ -2066,13 +2024,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not file_id:
             await update.message.reply_text("❌ 请发送图片文件", reply_markup=cancel_kb)
             return
-        key_map = {'alipay': 'alipay_qr_file_id', 'wechat': 'wechat_qr_file_id', 'usdt': 'usdt_qr_file_id'}
-        key = key_map.get(pay_type, 'wechat_qr_file_id')
+        key_map = {'usdt': 'usdt_qr_file_id'}
+        key = key_map.get(pay_type, 'usdt_qr_file_id')
         set_setting_value(key, file_id)
         context.user_data.pop('set_payimg', None)
-        label_map = {'alipay': '支付宝', 'wechat': '微信支付', 'usdt': 'USDT'}
-        back_map = {'alipay': 'admin_pay_alipay_cfg', 'wechat': 'admin_pay_wechat_cfg', 'usdt': 'admin_pay_usdt_cfg'}
-        label = label_map.get(pay_type, '收款')
+        label_map = {'usdt': 'USDT'}
+        back_map = {'usdt': 'admin_pay_usdt_cfg'}
+        label = label_map.get(pay_type, 'USDT')
         await update.message.reply_text(f"✅ 已更新{label}收款码。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data=back_map.get(pay_type, 'admin_pay_settings'))]]))
         return
 
