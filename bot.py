@@ -1026,6 +1026,10 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     elif data.startswith("order_"):
         parts = data.split("_")
+        if len(parts) < 4:
+            logger.warning("Invalid order callback payload: %s", data)
+            await query.answer("参数错误，请重试", show_alert=True)
+            return
         plan_key = parts[1]
         order_type = parts[2]
         if order_type == 'renew':
@@ -1039,6 +1043,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         # paymethod_{alipay|wechat}_{plan_key}_{order_type}_{short_id}
         parts = data.split("_", 4)
         if len(parts) < 5:
+            logger.warning("Invalid paymethod callback payload: %s", data)
             await query.answer("参数错误")
             return
         _, pay_method, plan_key, order_type, short_id = parts
@@ -1052,9 +1057,12 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await start(update, context)
 
 async def show_payment_method_menu(update, context, plan_key, order_type, short_id):
-    if payment_method == 'usdt' and not (str(plan_dict.get('usdt_price') or '').strip()):
-        await send_or_edit_menu(update, context, "⚠️ 当前套餐未配置 USDT 金额，请联系管理员。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+    plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
+    if not plan:
+        await send_or_edit_menu(update, context, "⚠️ 套餐不存在或已下架，请返回重新选择。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         return
+    plan_dict = dict(plan)
+    usdt_plan_ready = bool(str(plan_dict.get('usdt_price') or '').strip())
 
     type_str = "续费" if order_type == 'renew' else "新购"
 
@@ -1079,6 +1087,19 @@ async def show_payment_method_menu(update, context, plan_key, order_type, short_
         return
     kb.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
     await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
+
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    err = context.error
+    if isinstance(update, Update) and update.callback_query:
+        callback_data = update.callback_query.data
+        user_id = update.callback_query.from_user.id
+        logger.exception("Unhandled callback exception: user_id=%s callback_data=%s error=%s", user_id, callback_data, err)
+        try:
+            await update.callback_query.answer("⚠️ 系统异常，请稍后重试。", show_alert=True)
+        except Exception:
+            pass
+        return
+    logger.exception("Unhandled telegram update exception: %s", err)
 
 
 async def handle_order_confirmation(update, context, plan_key, order_type, short_id, payment_method='alipay'):
@@ -2851,6 +2872,7 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^view_sub_"))
     app.add_handler(CallbackQueryHandler(process_order, pattern="^(ap|rj|review)_"))
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
+    app.add_error_handler(telegram_error_handler)
     
     app.job_queue.run_daily(check_expiry_job, time=datetime.time(hour=12, minute=0, second=0))
     app.job_queue.run_repeating(check_anomalies_job, interval=3600, first=60, name='check_anomalies_job')
