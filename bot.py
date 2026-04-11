@@ -77,6 +77,48 @@ order_payment_method_cache = {}
 panel_capabilities_cache = {}
 panel_capabilities_runtime_success = {}
 dynamic_snippets_cache = {}
+SUPPORT_REPLY_TTL_SECONDS = 1800
+
+
+def _get_support_session_store(application):
+    store = application.bot_data.get('support_reply_sessions')
+    if not isinstance(store, dict):
+        store = {}
+        application.bot_data['support_reply_sessions'] = store
+    return store
+
+
+def set_support_reply_session(context: ContextTypes.DEFAULT_TYPE, user_id: int, source: str, admin_id: int | None = None):
+    store = _get_support_session_store(context.application)
+    now_ts = int(time.time())
+    store[int(user_id)] = {
+        'active': True,
+        'source': source,
+        'admin_id': int(admin_id) if admin_id else None,
+        'updated_at': now_ts,
+        'expire_at': now_ts + SUPPORT_REPLY_TTL_SECONDS,
+    }
+
+
+def get_support_reply_session(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    store = _get_support_session_store(context.application)
+    sess = store.get(int(user_id))
+    if not isinstance(sess, dict):
+        return None
+    now_ts = int(time.time())
+    expire_at = int(sess.get('expire_at') or 0)
+    if expire_at and expire_at < now_ts:
+        store.pop(int(user_id), None)
+        logger.info("support reply context expired: user=%s expire_at=%s", user_id, expire_at)
+        return None
+    return sess
+
+
+def clear_support_reply_session(context: ContextTypes.DEFAULT_TYPE, user_id: int, reason: str):
+    store = _get_support_session_store(context.application)
+    existed = store.pop(int(user_id), None)
+    if existed:
+        logger.info("support reply context cleared: user=%s reason=%s", user_id, reason)
 
 def get_short_id(real_uuid):
     for sid, uid in uuid_map.items():
@@ -686,6 +728,7 @@ async def send_or_edit_menu(update, context, text, reply_markup, parse_mode='Mar
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     user_id = update.effective_user.id
+    clear_support_reply_session(context, user_id, reason='enter_start_menu')
     args = getattr(context, 'args', None) or []
     if args:
         raw = str(args[0]).strip()
@@ -776,7 +819,10 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data == "contact_support":
         context.user_data['chat_mode'] = 'support'
-        context.user_data['support_reply_context'] = {'source': 'user_initiated', 'updated_at': int(time.time())}
+        support_ctx = {'source': 'user_initiated', 'updated_at': int(time.time())}
+        context.user_data['support_reply_context'] = support_ctx
+        set_support_reply_session(context, user_id, source='user_initiated')
+        logger.info("user entered support mode: user=%s source=user_initiated", user_id)
         msg = dynamic_snippets_cache.get("support_contact_tip") or "📞 **客服模式已开启**\n请直接发送文字、图片或文件。\n🚪 结束咨询请点击下方按钮。"
         keyboard = [[InlineKeyboardButton("🚪 结束咨询", callback_data="back_home")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
@@ -1271,6 +1317,8 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # 只要离开“回复输入模式”，就清理回复上下文，避免串场
     if not data.startswith("reply_user_"):
+        if 'reply_to_uid' in context.user_data:
+            logger.info("admin reply mode cleared by callback: admin=%s callback=%s", query.from_user.id, data)
         context.user_data.pop('reply_to_uid', None)
         context.user_data.pop('reply_back_cb', None)
     
@@ -1287,6 +1335,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         target_uid = int(uid_part)
         context.user_data['reply_to_uid'] = target_uid
         context.user_data['reply_back_cb'] = back_cb
+        logger.info("admin enter send-to-user mode: admin=%s target_user=%s back_cb=%s", query.from_user.id, target_uid, back_cb)
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回上一页", callback_data=back_cb)]])
         await query.message.reply_text(f"✍️ 请输入回复给用户 `{target_uid}` 的内容 (文字/图片)：", parse_mode='Markdown', reply_markup=cancel_kb)
         return
@@ -2333,12 +2382,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         back_cb = context.user_data.get('reply_back_cb', 'back_home')
         try:
             await context.bot.copy_message(chat_id=target_uid, from_chat_id=user_id, message_id=update.message.message_id)
-            target_user_state = context.application.user_data.setdefault(target_uid, {})
-            target_user_state['chat_mode'] = 'support'
-            target_user_state['support_reply_context'] = {
-                'source': 'admin_direct_reply',
-                'updated_at': int(time.time()),
-            }
+            set_support_reply_session(context, target_uid, source='admin_direct_reply', admin_id=user_id)
+            logger.info("admin message delivered and support context activated: admin=%s target_user=%s", user_id, target_uid)
             await context.bot.send_message(
                 target_uid,
                 "👆 **来自客服/管理员的回复**\n你现在处于客服会话模式，下一条消息将直接发送给客服。",
@@ -2355,11 +2400,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del context.user_data['reply_to_uid']
         context.user_data.pop('reply_back_cb', None)
         return
-    support_mode_active = context.user_data.get('chat_mode') == 'support'
+    support_ctx = get_support_reply_session(context, user_id)
+    if not support_ctx and context.user_data.get('chat_mode') == 'support':
+        fallback_ctx = context.user_data.get('support_reply_context') or {}
+        source = fallback_ctx.get('source', 'user_initiated')
+        set_support_reply_session(context, user_id, source=source)
+        support_ctx = get_support_reply_session(context, user_id)
+    support_mode_active = bool(support_ctx)
     if support_mode_active:
-        support_ctx = context.user_data.get('support_reply_context') or {}
         source = support_ctx.get('source', 'user_initiated')
-        logger.info("support message routed first: user=%s source=%s", user_id, source)
+        context.user_data['chat_mode'] = 'support'
+        context.user_data['support_reply_context'] = {'source': source, 'updated_at': int(time.time())}
+        set_support_reply_session(context, user_id, source=source, admin_id=support_ctx.get('admin_id'))
+        logger.info("user message routed to support first: user=%s source=%s", user_id, source)
         admin_header = f"📨 <b>新客服消息</b>\n来自：{update.effective_user.mention_html()} ({user_id})\n会话来源：{source}"
         reply_kb = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ 回复此用户", callback_data=f"reply_user_{user_id}_back_home")]])
         await context.bot.send_message(ADMIN_ID, admin_header, reply_markup=reply_kb, parse_mode='HTML')
@@ -2490,7 +2543,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     pending_order = get_pending_order_for_user(db_query, user_id)
     if pending_order:
-        logger.info("pending order proof route: user=%s order=%s", user_id, pending_order.get('order_id'))
+        logger.info("user message routed to pending-order proof: user=%s order=%s", user_id, pending_order.get('order_id'))
         awaiting_order_id = context.user_data.get('awaiting_manual_review_proof_order_id')
         if awaiting_order_id and awaiting_order_id != pending_order['order_id']:
             logger.warning("awaiting order mismatch: user=%s expected=%s actual=%s", user_id, awaiting_order_id, pending_order['order_id'])
