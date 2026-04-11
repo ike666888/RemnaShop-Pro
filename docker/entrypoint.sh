@@ -1,6 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
+umask 027
+
 CONFIG_PATH="${REMNASHOP_CONFIG:-/app/config.json}"
 DB_PATH="${REMNASHOP_DB:-/app/starlight.db}"
 
@@ -29,5 +31,19 @@ if [ ! -f "$CONFIG_PATH" ]; then
 JSON
   echo "[entrypoint] 已生成配置文件: $CONFIG_PATH"
 fi
+
+python - "$CONFIG_PATH" <<'PY'
+import json
+import pathlib
+import sys
+
+config_path = pathlib.Path(sys.argv[1])
+cfg = json.loads(config_path.read_text(encoding="utf-8"))
+required = ["admin_id", "bot_token"]
+missing = [key for key in required if not str(cfg.get(key, "")).strip()]
+if missing:
+    raise SystemExit(f"[entrypoint] 配置缺少字段: {', '.join(missing)}")
+print(f"[entrypoint] 配置校验通过: {config_path}")
+PY
 
 exec python bot.py

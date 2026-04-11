@@ -52,18 +52,46 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main
 
 ## Docker Compose 部署
 
-### 1) 准备配置目录
+### 1) 初始化环境变量（生产推荐）
 
 ```bash
-mkdir -p data
+cp .env.example .env
 ```
+
+按需编辑 `.env`，至少填写：
+
+- `ADMIN_ID`
+- `BOT_TOKEN`
+
+其余面板参数建议一并填写，便于首次启动自动生成 `config.json`。
+
+### 2) 启动
+
+```bash
+docker compose up -d --build
+```
+
+### 3) 运行检查
+
+```bash
+docker compose ps
+docker compose logs -f remnashop
+```
+
+### 4) 停止
+
+```bash
+docker compose down
+```
+
+### 5) 配置策略（推荐）
 
 可选两种方式：
 
-- **方式 A（推荐）**：手动创建 `data/config.json`。
-- **方式 B**：不提供 `config.json`，在 `docker-compose.yml` 里填写 `ADMIN_ID`、`BOT_TOKEN` 等环境变量，容器首次启动会自动生成配置。
+- **方式 A（推荐）**：首次由容器根据 `.env` 自动生成 `/data/config.json`，后续固定使用该配置。
+- **方式 B**：自行维护 `config.json` 后挂载到 `/data/config.json`。
 
-示例 `data/config.json`：
+示例 `config.json`：
 
 ```json
 {
@@ -77,25 +105,32 @@ mkdir -p data
 }
 ```
 
-### 2) 启动
+### 6) 数据持久化与备份
+
+当前 Compose 使用命名卷 `remnashop-data` 保存 `/data/config.json` 与 `/data/starlight.db`。
+
+备份示例（导出命名卷到当前目录）：
 
 ```bash
+mkdir -p backup
+docker run --rm -v remnashop-pro_remnashop-data:/from -v "$PWD/backup:/to" alpine sh -c "cp -a /from/. /to/"
+```
+
+恢复示例：
+
+```bash
+docker run --rm -v remnashop-pro_remnashop-data:/to -v "$PWD/backup:/from" alpine sh -c "cp -a /from/. /to/"
+```
+
+### 7) 升级流程（生产建议）
+
+```bash
+git pull
 docker compose up -d --build
+docker compose ps
 ```
 
-### 3) 查看日志
-
-```bash
-docker compose logs -f remnashop
-```
-
-### 4) 停止
-
-```bash
-docker compose down
-```
-
-> 数据持久化说明：`./data` 会映射到容器 `/data`，其中 `config.json` 与 `starlight.db` 会持久保存。
+本 Compose 已内置生产向配置：`healthcheck`、日志轮转、`init: true`、`no-new-privileges`、`tmpfs /tmp`、`unless-stopped` 重启策略。
 
 ---
 
