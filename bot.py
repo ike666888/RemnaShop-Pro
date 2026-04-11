@@ -2406,9 +2406,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del context.user_data['reply_to_uid']
         context.user_data.pop('reply_back_cb', None)
         return
-    if context.user_data.get('chat_mode') == 'support':
+    support_mode_active = context.user_data.get('chat_mode') == 'support'
+    if support_mode_active:
         support_ctx = context.user_data.get('support_reply_context') or {}
         source = support_ctx.get('source', 'user_initiated')
+        logger.info("support message routed first: user=%s source=%s", user_id, source)
         admin_header = f"📨 <b>新客服消息</b>\n来自：{update.effective_user.mention_html()} ({user_id})\n会话来源：{source}"
         reply_kb = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ 回复此用户", callback_data=f"reply_user_{user_id}_back_home")]])
         await context.bot.send_message(ADMIN_ID, admin_header, reply_markup=reply_kb, parse_mode='HTML')
@@ -2539,6 +2541,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     pending_order = get_pending_order_for_user(db_query, user_id)
     if pending_order:
+        logger.info("pending order proof route: user=%s order=%s", user_id, pending_order.get('order_id'))
         awaiting_order_id = context.user_data.get('awaiting_manual_review_proof_order_id')
         if awaiting_order_id and awaiting_order_id != pending_order['order_id']:
             logger.warning("awaiting order mismatch: user=%s expected=%s actual=%s", user_id, awaiting_order_id, pending_order['order_id'])
