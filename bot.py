@@ -1058,6 +1058,19 @@ async def submit_manual_review_proof(update: Update, context: ContextTypes.DEFAU
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]),
     )
 
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    err = context.error
+    if isinstance(update, Update) and update.callback_query:
+        callback_data = update.callback_query.data
+        user_id = update.callback_query.from_user.id
+        logger.exception("Unhandled callback exception: user_id=%s callback_data=%s error=%s", user_id, callback_data, err)
+        try:
+            await update.callback_query.answer("⚠️ 系统异常，请稍后重试。", show_alert=True)
+        except Exception:
+            pass
+        return
+    logger.exception("Unhandled telegram update exception: %s", err)
+
 
 async def handle_order_confirmation(update, context, plan_key, order_type, short_id, payment_method='alipay'):
     user_id = update.effective_user.id
