@@ -1138,7 +1138,7 @@ async def show_payment_method_menu(update, context, plan_key, order_type, short_
     )
     kb = [[InlineKeyboardButton("🧾 人工审核", callback_data=f"manualreview_{plan_key}_{order_type}_{short_id}")]]
     if resolve_payment_state('usdt')['available'] and str(plan_dict.get('usdt_price') or '').strip():
-        kb.append([InlineKeyboardButton("🟨 USDT", callback_data=f"paymethod_usdt_{plan_key}_{order_type}_{short_id}")])
+        kb.append([InlineKeyboardButton("💠 USDT 转账", callback_data=f"paymethod_usdt_{plan_key}_{order_type}_{short_id}")])
     kb.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
     await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
 
@@ -1257,13 +1257,24 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
         return
     path_label = "USDT" if payment_method == "usdt" else "人工审核"
     extra_tip = "👇 请直接在聊天中发送支付凭证（文字说明、截图、图片或文件），发送后会自动提交人工审核。"
+    usdt_qr_file_id = None
     if payment_method == "usdt":
         usdt_info = resolve_payment_state('usdt')
         usdt_price = str(plan_dict.get('usdt_price') or '').strip()
         if not usdt_info['available'] or not usdt_price:
             await send_or_edit_menu(update, context, "⚠️ 当前 USDT 未配置完整，请选择人工审核。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
             return
-        extra_tip = f"💰 USDT 金额：**{usdt_price} USDT**\n{usdt_info['pay_tip']}\n\n👇 完成后请发送 TXID/截图/说明，发送后会自动提交人工审核。"
+        usdt_network = (get_setting_value('usdt_network', 'TRC20') or 'TRC20').strip().upper()
+        usdt_address = (get_setting_value('usdt_address', '') or '').strip()
+        usdt_qr_file_id = usdt_info.get('qr_file_id') if usdt_info.get('should_send_qr') else None
+        tip_body = usdt_info['pay_tip'] if usdt_info.get('pay_tip') else "请完成转账后提交凭证。"
+        extra_tip = (
+            f"💰 USDT 金额：**{usdt_price} USDT**\n"
+            f"🌐 转账网络：`{usdt_network}`\n"
+            f"🏦 收款地址：`{usdt_address or '未配置'}`\n"
+            f"{tip_body}\n\n"
+            "👇 完成后请发送 TXID/截图/说明，发送后会自动提交人工审核。"
+        )
     msg = (
         f"📝 **订单已创建**\n"
         f"🆔 订单号：`{order['order_id']}`\n"
@@ -1277,6 +1288,21 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
     )
     kb = [[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")], [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]
     await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
+    if payment_method == "usdt" and usdt_qr_file_id:
+        usdt_price = str(plan_dict.get('usdt_price') or '').strip()
+        usdt_network = (get_setting_value('usdt_network', 'TRC20') or 'TRC20').strip().upper()
+        usdt_address = (get_setting_value('usdt_address', '') or '').strip()
+        qr_caption = (
+            "📷 **USDT 收款码**\n"
+            f"💰 金额：**{usdt_price} USDT**\n"
+            f"🌐 网络：`{usdt_network}`\n"
+            f"🏦 地址：`{usdt_address or '未配置'}`\n"
+            "转账完成后请发送 TXID / 截图 / 备注。"
+        )
+        try:
+            await context.bot.send_photo(chat_id=user_id, photo=usdt_qr_file_id, caption=qr_caption, parse_mode='Markdown')
+        except Exception as exc:
+            logger.warning("failed to send usdt qr image: user=%s order=%s err=%s", user_id, order['order_id'], exc)
 
 async def show_plans_menu(update, context):
     plans = db_query("SELECT * FROM plans")
