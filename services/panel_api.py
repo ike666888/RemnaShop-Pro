@@ -236,9 +236,100 @@ async def probe_api_capabilities(panel_url, headers, verify_tls=True):
         "users_bulk_update": ('POST', '/users/bulk/update', {"uuids": [], "fields": {}}),
         "users_bulk_delete": ('POST', '/users/bulk/delete', {"uuids": []}),
         "subscription_history": ('GET', '/subscription-request-history', None),
+        "ip_control": ('GET', '/ip-control', None),
+        "metadata": ('GET', '/metadata', None),
+        "system_health": ('GET', '/system/health', None),
+        "snippets": ('GET', '/snippets', None),
+        "subscription_page_configs": ('GET', '/subscription-page-configs', None),
+        "external_squads": ('GET', '/external-squads', None),
+        "config_profiles": ('GET', '/config-profiles', None),
     }
     result = {}
     for key, (method, endpoint, payload) in checks.items():
         resp = await safe_api_request(method, endpoint, panel_url, headers, verify_tls, json_data=payload)
         result[key] = bool(resp and resp.status_code not in (404, 405))
     return result
+
+
+async def _request_first_success(candidates, panel_url, headers, verify_tls=True, json_data=None, params=None):
+    for method, endpoint in candidates:
+        resp = await safe_api_request(method, endpoint, panel_url, headers, verify_tls, json_data=json_data, params=params)
+        if resp and resp.status_code < 400:
+            return resp
+    return None
+
+
+async def set_user_metadata(user_uuid, metadata: dict[str, Any], panel_url, headers, verify_tls=True):
+    payload = {"userUuid": user_uuid, "metadata": metadata}
+    candidates = [
+        ('POST', '/metadata/user'),
+        ('PUT', '/metadata/user'),
+        ('PATCH', '/metadata/user'),
+    ]
+    return await _request_first_success(candidates, panel_url, headers, verify_tls, json_data=payload)
+
+
+async def block_ip_address(ip: str, reason: str, panel_url, headers, verify_tls=True):
+    payload = {"ip": ip, "reason": reason}
+    candidates = [
+        ('POST', '/ip-control/blocked-ips'),
+        ('POST', '/ip-control/block'),
+        ('POST', '/ip-control/blacklist'),
+    ]
+    return await _request_first_success(candidates, panel_url, headers, verify_tls, json_data=payload)
+
+
+async def get_system_health(panel_url, headers, verify_tls=True):
+    candidates = [
+        ('GET', '/system/health'),
+        ('GET', '/system/info'),
+        ('GET', '/remnawave-settings'),
+    ]
+    resp = await _request_first_success(candidates, panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+async def get_snippet_by_key(key: str, panel_url, headers, verify_tls=True):
+    candidates = [
+        ('GET', f'/snippets/{key}'),
+        ('GET', '/snippets'),
+    ]
+    for method, endpoint in candidates:
+        params = {"key": key} if endpoint == '/snippets' else None
+        resp = await safe_api_request(method, endpoint, panel_url, headers, verify_tls, params=params)
+        if resp and resp.status_code == 200:
+            payload = extract_payload(resp)
+            if isinstance(payload, dict):
+                return payload
+            if isinstance(payload, list):
+                for row in payload:
+                    if isinstance(row, dict) and (row.get('key') == key or row.get('name') == key):
+                        return row
+    return {}
+
+
+async def get_subscription_page_configs(panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', '/subscription-page-configs', panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, (list, dict)) else {}
+    return {}
+
+
+async def get_external_squads(panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', '/external-squads', panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, list) else []
+    return []
+
+
+async def get_config_profiles(panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', '/config-profiles', panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, list) else []
+    return []

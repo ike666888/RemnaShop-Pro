@@ -7,7 +7,7 @@ import asyncio
 import qrcode
 from io import BytesIO
 from collections import defaultdict
-from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_user_by_telegram_id as api_get_user_by_telegram_id, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_realtime as api_get_bandwidth_nodes_realtime, bulk_move_users_to_squad as api_bulk_move_users_to_squad, create_user as api_create_user, patch_user as api_patch_user, delete_user as api_delete_user, enable_user as api_enable_user, disable_user as api_disable_user, reset_user_traffic as api_reset_user_traffic, get_subscription_request_history as api_get_subscription_request_history, bulk_delete_users as api_bulk_delete_users, probe_api_capabilities as api_probe_api_capabilities, close_all_clients, extract_payload
+from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_user_by_telegram_id as api_get_user_by_telegram_id, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_realtime as api_get_bandwidth_nodes_realtime, bulk_move_users_to_squad as api_bulk_move_users_to_squad, create_user as api_create_user, patch_user as api_patch_user, delete_user as api_delete_user, enable_user as api_enable_user, disable_user as api_disable_user, reset_user_traffic as api_reset_user_traffic, get_subscription_request_history as api_get_subscription_request_history, bulk_delete_users as api_bulk_delete_users, bulk_update_users as api_bulk_update_users, probe_api_capabilities as api_probe_api_capabilities, set_user_metadata as api_set_user_metadata, block_ip_address as api_block_ip_address, get_system_health as api_get_system_health, get_snippet_by_key as api_get_snippet_by_key, get_subscription_page_configs as api_get_subscription_page_configs, get_external_squads as api_get_external_squads, get_config_profiles as api_get_config_profiles, close_all_clients, extract_payload
 from services.orders import (
     create_order,
     get_order,
@@ -75,6 +75,7 @@ COOLDOWN_SECONDS = 1.0
 uuid_map = {}
 order_payment_method_cache = {}
 panel_capabilities_cache = {}
+dynamic_snippets_cache = {}
 
 def get_short_id(real_uuid):
     for sid, uid in uuid_map.items():
@@ -184,28 +185,31 @@ def resolve_payment_state(payment_method):
     if payment_method == "alipay":
         method_label = "支付宝"
         qr_file_id = get_setting_value("alipay_qr_file_id")
+        custom_tip = dynamic_snippets_cache.get("payment_alipay_tip", "")
         if not alipay_enabled:
             return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "管理员未配置收款，请等待管理配置收款。"}
         if alipay_token_enabled:
-            return {'available': True, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "请在下方直接发送 **支付宝口令红包**（文字）给机器人。"}
+            return {'available': True, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': custom_tip or "请在下方直接发送 **支付宝口令红包**（文字）给机器人。"}
         if alipay_qr_enabled and qr_file_id:
-            return {'available': True, 'method_label': method_label, 'should_send_qr': True, 'qr_file_id': qr_file_id, 'pay_tip': "请按下方支付宝收款码完成付款后，发送 **支付截图/备注** 给机器人。"}
+            return {'available': True, 'method_label': method_label, 'should_send_qr': True, 'qr_file_id': qr_file_id, 'pay_tip': custom_tip or "请按下方支付宝收款码完成付款后，发送 **支付截图/备注** 给机器人。"}
         return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "管理员未配置收款，请等待管理配置收款。"}
 
     if payment_method == "wechat":
         method_label = "微信支付"
         qr_file_id = get_setting_value("wechat_qr_file_id")
+        custom_tip = dynamic_snippets_cache.get("payment_wechat_tip", "")
         if wechat_enabled and qr_file_id:
-            return {'available': True, 'method_label': method_label, 'should_send_qr': True, 'qr_file_id': qr_file_id, 'pay_tip': "请按下方微信收款码完成付款后，发送 **支付截图/备注** 给机器人。"}
+            return {'available': True, 'method_label': method_label, 'should_send_qr': True, 'qr_file_id': qr_file_id, 'pay_tip': custom_tip or "请按下方微信收款码完成付款后，发送 **支付截图/备注** 给机器人。"}
         return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "管理员未配置收款，请等待管理配置收款。"}
 
     if payment_method == "usdt":
         method_label = "USDT"
+        custom_tip = dynamic_snippets_cache.get("payment_usdt_tip", "")
         network = (get_setting_value('usdt_network', 'TRC20') or 'TRC20').strip().upper()
         address = (get_setting_value('usdt_address', '') or '').strip()
         qr_file_id = get_setting_value('usdt_qr_file_id')
         if usdt_enabled and address:
-            tip = f"请使用 **{network}** 网络向以下地址转账，完成后发送 **TXID/截图** 给机器人。\n`{address}`"
+            tip = custom_tip or f"请使用 **{network}** 网络向以下地址转账，完成后发送 **TXID/截图** 给机器人。\n`{address}`"
             return {'available': True, 'method_label': method_label, 'should_send_qr': bool(qr_file_id), 'qr_file_id': qr_file_id, 'pay_tip': tip}
         return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "USDT 收款未配置完成，请等待管理员配置。"}
 
@@ -308,6 +312,22 @@ def apply_template_payload(payload, actor='系统'):
     for k, v in settings.items():
         set_setting_value(k, v)
     append_ops_timeline('模板', '应用运营模板', json.dumps(settings, ensure_ascii=False)[:180], actor=actor)
+
+
+async def sync_user_metadata(user_uuid, tg_id, plan_key="", order_id="", risk_level=""):
+    if not user_uuid:
+        return
+    payload = {
+        "tg_id": str(tg_id),
+        "plan_key": str(plan_key or ""),
+        "last_order_id": str(order_id or ""),
+        "risk_level": str(risk_level or ""),
+        "updated_at": int(time.time()),
+    }
+    try:
+        await set_panel_user_metadata(user_uuid, payload)
+    except Exception as exc:
+        logger.warning("sync_user_metadata failed for %s: %s", user_uuid, exc)
 
 
 def panel_config_ready():
@@ -426,11 +446,75 @@ async def bulk_delete_panel_users(uuids):
     return await api_bulk_delete_users(uuids, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
 
+async def bulk_update_panel_users(uuids, fields):
+    return await api_bulk_update_users(uuids, fields, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def set_panel_user_metadata(user_uuid, metadata):
+    return await api_set_user_metadata(user_uuid, metadata, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def block_panel_ip(ip, reason):
+    return await api_block_ip_address(ip, reason, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_panel_system_health():
+    return await api_get_system_health(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_panel_snippet(key):
+    return await api_get_snippet_by_key(key, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_panel_subscription_page_configs():
+    return await api_get_subscription_page_configs(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_panel_external_squads():
+    return await api_get_external_squads(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_panel_config_profiles():
+    return await api_get_config_profiles(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
 async def refresh_panel_capabilities():
     global panel_capabilities_cache
     panel_capabilities_cache = await api_probe_api_capabilities(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
     logger.info("Panel capabilities: %s", panel_capabilities_cache)
     return panel_capabilities_cache
+
+
+async def refresh_dynamic_snippets():
+    global dynamic_snippets_cache
+    keys = ["payment_alipay_tip", "payment_wechat_tip", "payment_usdt_tip", "support_contact_tip"]
+    rows = {}
+    for key in keys:
+        payload = await get_panel_snippet(key)
+        if isinstance(payload, dict):
+            value = payload.get('value') or payload.get('content') or payload.get('text')
+            if isinstance(value, str) and value.strip():
+                rows[key] = value.strip()
+    dynamic_snippets_cache = rows
+    if rows:
+        logger.info("Loaded dynamic snippets from panel: %s", ",".join(sorted(rows.keys())))
+    return rows
+
+
+async def warmup_panel_runtime_data():
+    if not panel_config_ready():
+        return
+    await refresh_panel_capabilities()
+    health = await get_panel_system_health()
+    if health:
+        logger.info("Panel health/info loaded: keys=%s", ",".join(sorted(list(health.keys()))[:12]))
+    await refresh_dynamic_snippets()
+    try:
+        squads = await get_panel_external_squads()
+        profiles = await get_panel_config_profiles()
+        logger.info("Panel inventory external_squads=%s config_profiles=%s", len(squads), len(profiles))
+    except Exception as exc:
+        logger.warning("Panel inventory warmup failed: %s", exc)
 
 
 async def build_squad_capacity_summary(max_users=60):
@@ -603,7 +687,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data == "contact_support":
         context.user_data['chat_mode'] = 'support'
-        msg = "📞 **客服模式已开启**\n请直接发送文字、图片或文件。\n🚪 结束咨询请点击下方按钮。"
+        msg = dynamic_snippets_cache.get("support_contact_tip") or "📞 **客服模式已开启**\n请直接发送文字、图片或文件。\n🚪 结束咨询请点击下方按钮。"
         keyboard = [[InlineKeyboardButton("🚪 结束咨询", callback_data="back_home")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
         return
@@ -2374,7 +2458,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "uuid": target_uuid,
                 "trafficLimitBytes": new_limit,
                 "expireAt": expire_iso,
-                "status": "ACTIVE",
+                "status": USER_STATUS_ACTIVE,
                 "activeInternalSquads": [TARGET_GROUP_UUID],
                 "trafficLimitStrategy": reset_strategy,
             }
@@ -2383,6 +2467,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if r and r.status_code in [200, 204]:
                 update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_DELIVERED, delivered_uuid=target_uuid)
                 append_order_audit_log(db_execute, order_id, 'deliver_success', query.from_user.id, 'renew')
+                await sync_user_metadata(target_uuid, uid, plan_key=plan_key, order_id=order_id)
                 await query.edit_message_text(f"✅ 续费成功\n用户: {uid}", reply_markup=admin_return_btn)
                 sub_url = user_info.get('subscriptionUrl', '')
                 display_expire = format_time(expire_iso)
@@ -2407,7 +2492,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             expire_iso = new_expire.strftime("%Y-%m-%dT%H:%M:%SZ")
             payload = {
                 "username": f"tg_{uid}_{int(time.time())}",
-                "status": "ACTIVE",
+                "status": USER_STATUS_ACTIVE,
                 "trafficLimitBytes": add_traffic,
                 "trafficLimitStrategy": reset_strategy,
                 "expireAt": expire_iso,
@@ -2424,6 +2509,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_DELIVERED, delivered_uuid=user_uuid)
                 append_order_audit_log(db_execute, order_id, 'deliver_success', query.from_user.id, 'new')
+                await sync_user_metadata(user_uuid, uid, plan_key=plan_key, order_id=order_id)
                 await query.edit_message_text(f"✅ 开通成功\n用户: {uid}", reply_markup=admin_return_btn)
                 sub_url = resp_data.get('subscriptionUrl', '')
                 display_expire = format_time(expire_iso)
@@ -2483,6 +2569,7 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
     if not subs: return
     now = datetime.datetime.utcnow()
     to_delete_uuids = []
+    to_disable_uuids = []
     sem = asyncio.Semaphore(10)
     async def check_single_sub(sub):
         async with sem:
@@ -2511,8 +2598,8 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
                             )
                         except Exception as exc:
                             logger.warning("Failed to send expiry notice to %s: %s", u_dict['tg_id'], exc)
-                if days_left == -1 and info.get('status') == 'active':
-                    await disable_panel_user(u_dict['uuid'])
+                if days_left == -1 and str(info.get('status', '')).lower() == 'active':
+                    to_disable_uuids.append(u_dict['uuid'])
                 if days_left < -cleanup_days:
                     to_delete_uuids.append(u_dict['uuid'])
                     db_execute("DELETE FROM subscriptions WHERE uuid = ?", (u_dict['uuid'],))
@@ -2524,6 +2611,8 @@ async def check_expiry_job(context: ContextTypes.DEFAULT_TYPE):
                 logger.warning("check_single_sub failed for %s: %s", u_dict.get('uuid'), e)
     tasks = [check_single_sub(sub) for sub in subs]
     await asyncio.gather(*tasks)
+    if to_disable_uuids:
+        await bulk_update_panel_users(to_disable_uuids, {"status": "DISABLED"})
     if to_delete_uuids:
         await bulk_delete_panel_users(to_delete_uuids)
 
@@ -2594,6 +2683,9 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
         unfreeze_candidates = get_json_setting('risk_unfreeze_candidates', {})
         if not isinstance(unfreeze_candidates, dict):
             unfreeze_candidates = {}
+        high_risk_disable_uuids = []
+        mid_risk_limited_uuids = []
+        ip_control_enabled = bool(panel_capabilities_cache.get("ip_control", False))
 
         for item in incidents:
             uid = item['uid']
@@ -2602,11 +2694,11 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
                 risk_level = '高'
                 if enforce_mode == 'enforce':
                     action_taken = '禁用'
-                    await disable_panel_user(uid)
+                    high_risk_disable_uuids.append(uid)
                     unfreeze_candidates.pop(uid, None)
                 elif enforce_mode == 'gray':
                     action_taken = '限速(灰度)'
-                    await patch_panel_user({"uuid": uid, "status": USER_STATUS_LIMITED})
+                    mid_risk_limited_uuids.append(uid)
                     unfreeze_candidates[uid] = int(time.time())
                 else:
                     action_taken = '仅告警(观察)'
@@ -2615,7 +2707,7 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
                 risk_level = '中'
                 if enforce_mode == 'enforce':
                     action_taken = '限速'
-                    await patch_panel_user({"uuid": uid, "status": USER_STATUS_LIMITED})
+                    mid_risk_limited_uuids.append(uid)
                     unfreeze_candidates[uid] = int(time.time())
                 else:
                     action_taken = '仅告警(灰度/观察)'
@@ -2631,6 +2723,13 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
                 (uid, risk_level, score, int(item['ip_count']), int(item['ua_diversity']), int(item['density']), action_taken, evidence_summary[:400], int(time.time())),
             )
             append_ops_timeline('风控', '异常处置', f'uid={uid},level={risk_level},action={action_taken},score={score}', actor='系统', target=uid)
+            await sync_user_metadata(uid, tg_id="-", risk_level=risk_level)
+
+            if ip_control_enabled and risk_level == '高':
+                for ev in item.get('evidence', [])[:3]:
+                    ip = str(ev.get('ip') or '').strip()
+                    if ip and ip not in {"-", "unknown"}:
+                        await block_panel_ip(ip, f"anomaly_high_risk_score_{score}")
 
             try:
                 lines = [
@@ -2652,6 +2751,11 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(ADMIN_ID, "\n".join(lines), parse_mode='MarkdownV2', reply_markup=quick_kb)
             except Exception as exc:
                 logger.warning("Failed to notify anomaly admin: %s", exc)
+
+        if high_risk_disable_uuids:
+            await bulk_update_panel_users(high_risk_disable_uuids, {"status": "DISABLED"})
+        if mid_risk_limited_uuids:
+            await bulk_update_panel_users(mid_risk_limited_uuids, {"status": USER_STATUS_LIMITED})
 
         set_risk_watchlist(watchlist)
         set_json_setting('risk_unfreeze_candidates', unfreeze_candidates)
@@ -2711,7 +2815,7 @@ if __name__ == '__main__':
                 loop = asyncio.get_event_loop()
                 loop.create_task(reschedule_anomaly_job(app, val_int['value']))
         if panel_config_ready():
-            asyncio.get_event_loop().create_task(refresh_panel_capabilities())
+            asyncio.get_event_loop().create_task(warmup_panel_runtime_data())
     except Exception as exc:
         logger.warning("Failed to reschedule anomaly job at startup: %s", exc)
 
