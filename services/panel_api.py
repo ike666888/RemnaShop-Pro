@@ -9,6 +9,12 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 _CLIENTS: dict[bool, httpx.AsyncClient] = {}
 
+IP_CONTROL_ENDPOINT_SPECS: tuple[tuple[str, str], ...] = (
+    ('POST', '/ip-control/drop-connections'),
+    ('POST', '/ip-control/fetch-ips/{uuid}'),
+    ('GET', '/ip-control/fetch-ips/result/{jobId}'),
+)
+
 
 def _get_client(verify_tls: bool) -> httpx.AsyncClient:
     client = _CLIENTS.get(verify_tls)
@@ -247,6 +253,11 @@ async def probe_api_capabilities(panel_url, headers, verify_tls=True):
     for key, (method, endpoint, payload) in checks.items():
         resp = await safe_api_request(method, endpoint, panel_url, headers, verify_tls, json_data=payload)
         result[key] = bool(resp and resp.status_code not in (404, 405))
+    result["ip_control"] = bool(
+        result.get("ip_control_drop_connections")
+        or result.get("ip_control_fetch_ips")
+        or result.get("ip_control_fetch_ips_result")
+    )
     return result
 
 
@@ -259,23 +270,25 @@ async def _request_first_success(candidates, panel_url, headers, verify_tls=True
 
 
 async def set_user_metadata(user_uuid, metadata: dict[str, Any], panel_url, headers, verify_tls=True):
-    payload = {"userUuid": user_uuid, "metadata": metadata}
+    payload = {"metadata": metadata}
     candidates = [
-        ('POST', '/metadata/user'),
-        ('PUT', '/metadata/user'),
-        ('PATCH', '/metadata/user'),
+        ('PUT', f'/metadata/user/{user_uuid}'),
+        ('PATCH', f'/metadata/user/{user_uuid}'),
+        ('POST', f'/metadata/user/{user_uuid}'),
     ]
     return await _request_first_success(candidates, panel_url, headers, verify_tls, json_data=payload)
 
 
 async def block_ip_address(ip: str, reason: str, panel_url, headers, verify_tls=True):
-    payload = {"ip": ip, "reason": reason}
-    candidates = [
-        ('POST', '/ip-control/blocked-ips'),
-        ('POST', '/ip-control/block'),
-        ('POST', '/ip-control/blacklist'),
-    ]
-    return await _request_first_success(candidates, panel_url, headers, verify_tls, json_data=payload)
+    payload = {
+        "dropBy": {"by": "ipAddresses", "ipAddresses": [ip]},
+        "targetNodes": {"target": "allNodes"},
+    }
+    resp = await safe_api_request('POST', '/ip-control/drop-connections', panel_url, headers, verify_tls, json_data=payload)
+    if resp and resp.status_code < 400:
+        logger.info("Dropped connections for ip=%s (reason=%s)", ip, reason)
+        return resp
+    return None
 
 
 async def get_system_health(panel_url, headers, verify_tls=True):

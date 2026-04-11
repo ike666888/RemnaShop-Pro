@@ -340,7 +340,9 @@ async def sync_user_metadata(user_uuid, tg_id, plan_key="", order_id="", risk_le
         "updated_at": int(time.time()),
     }
     try:
-        await set_panel_user_metadata(user_uuid, payload)
+        resp = await set_panel_user_metadata(user_uuid, payload)
+        if resp is not None and resp.status_code >= 400:
+            logger.warning("sync_user_metadata panel rejected for %s: status=%s", user_uuid, resp.status_code)
     except Exception as exc:
         logger.warning("sync_user_metadata failed for %s: %s", user_uuid, exc)
 
