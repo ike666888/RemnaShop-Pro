@@ -1,6 +1,6 @@
 # 🚀 RemnaShop-Pro
 
-当前版本：`V3.5`
+当前版本：`V3.6`
 
 RemnaShop-Pro 是一个面向 **Remnawave 面板** 的 Telegram 机器人，提供订阅售卖、续费、状态查询与基础运维能力。
 
