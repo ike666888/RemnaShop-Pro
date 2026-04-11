@@ -1,5 +1,11 @@
 .git
 .gitignore
+tests/
+docs/
+README.md
+AGENTS.md
+LICENSE
+.env.example
 __pycache__/
 *.pyc
 *.pyo

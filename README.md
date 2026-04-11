@@ -49,9 +49,17 @@ curl -fsSL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/bootst
 3. 检查并安装 Docker Compose 插件（缺失时）
 4. 克隆/更新仓库到 `/opt/remnashop-pro`
 5. 若 `.env` 不存在则基于 `.env.example` 自动创建
-6. 交互收集必填 `ADMIN_ID` 与 `BOT_TOKEN`（已有值可选择保留或替换），并自动写入 `.env`
+6. 使用中文交互收集必填 `ADMIN_ID` 与 `BOT_TOKEN`（已有值可选择保留或替换），并自动写入 `.env`
 7. 启动 Docker Compose 栈
 8. 等待 `remnashop` 容器健康状态变为 `healthy` 后才报告安装成功
+
+示例交互（节选）：
+
+```text
+[remnashop-bootstrap] 正在配置必填环境变量（仅 ADMIN_ID 与 BOT_TOKEN）。
+检测到现有 ADMIN_ID='123456789'，是否保留？[Y/n]:
+请输入 BOT_TOKEN:
+```
 
 > `bootstrap.sh` 支持两种模式：
 > - 交互菜单（直接执行 `bash bootstrap.sh`）
@@ -145,13 +153,25 @@ cd /opt/remnashop-pro
 脚本会校验 `ADMIN_ID` 与 `BOT_TOKEN` 不可为空，否则不会继续部署。
 脚本通过 `/dev/tty` 进行交互输入；若当前执行环境无可用 TTY，则会明确报错并提示先在 `.env` 预置必填值后再执行安装。
 
-建议一并配置：
+以下变量在安装阶段均为可选，不会阻塞部署；可后续在机器人/应用内配置：
 
 - `PANEL_URL`
 - `PANEL_TOKEN`
 - `SUB_DOMAIN`
 - `GROUP_UUID`
 - `PANEL_VERIFY_TLS`
+
+## 生产镜像构建说明
+
+生产镜像通过 `.dockerignore` 排除非运行时文件，不会打包以下内容：
+
+- `tests/`
+- `docs/`
+- `README.md`
+- `AGENTS.md`
+- `LICENSE`
+- `.gitignore`
+- `.env.example`
 
 ---
 
