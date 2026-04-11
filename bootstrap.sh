@@ -49,7 +49,115 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
-install_docker_if_missing() {
+detect_package_manager() {
+  if require_cmd apt-get; then
+    PACKAGE_MANAGER="apt"
+  elif require_cmd dnf; then
+    PACKAGE_MANAGER="dnf"
+  elif require_cmd yum; then
+    PACKAGE_MANAGER="yum"
+  else
+    PACKAGE_MANAGER=""
+  fi
+}
+
+pkg_update_if_needed() {
+  if [ "${PKG_UPDATED:-0}" -eq 1 ]; then
+    return
+  fi
+
+  case "${PACKAGE_MANAGER}" in
+    apt)
+      log "Refreshing apt package index..."
+      ${SUDO} apt-get update -y
+      ;;
+    dnf|yum)
+      ;;
+    *)
+      err "No supported package manager found for automatic dependency installation."
+      return 1
+      ;;
+  esac
+
+  PKG_UPDATED=1
+}
+
+install_packages() {
+  if [ "$#" -eq 0 ]; then
+    return 0
+  fi
+
+  case "${PACKAGE_MANAGER}" in
+    apt)
+      pkg_update_if_needed
+      ${SUDO} apt-get install -y "$@"
+      ;;
+    dnf)
+      ${SUDO} dnf install -y "$@"
+      ;;
+    yum)
+      ${SUDO} yum install -y "$@"
+      ;;
+    *)
+      err "Cannot install packages automatically: unsupported package manager."
+      return 1
+      ;;
+  esac
+}
+
+ensure_cmd_with_package() {
+  local cmd="$1"
+  local pkg="$2"
+
+  if require_cmd "${cmd}"; then
+    log "Dependency check: ${cmd} is available."
+    return 0
+  fi
+
+  warn "Dependency missing: ${cmd}. Attempting automatic install (package: ${pkg})."
+  install_packages "${pkg}"
+  if require_cmd "${cmd}"; then
+    log "Dependency installed: ${cmd}."
+    return 0
+  fi
+
+  err "Failed to install dependency '${cmd}' automatically."
+  return 1
+}
+
+install_base_dependencies() {
+  detect_package_manager
+  if [ -z "${PACKAGE_MANAGER}" ]; then
+    err "Unsupported system: requires apt, dnf, or yum for automatic dependency installation."
+    exit 1
+  fi
+
+  log "Checking common base dependencies for bootstrap."
+  ensure_cmd_with_package bash bash
+  ensure_cmd_with_package tar tar
+  ensure_cmd_with_package gzip gzip
+  ensure_cmd_with_package unzip unzip
+  ensure_cmd_with_package jq jq
+  ensure_cmd_with_package sed sed
+  ensure_cmd_with_package grep grep
+  ensure_cmd_with_package awk gawk
+  ensure_cmd_with_package ls coreutils
+  ensure_cmd_with_package curl curl
+  ensure_cmd_with_package git git
+
+  if ! require_cmd update-ca-certificates; then
+    warn "Dependency missing: ca-certificates. Attempting automatic install."
+    install_packages ca-certificates
+    if ! require_cmd update-ca-certificates; then
+      err "Failed to install ca-certificates automatically."
+      exit 1
+    fi
+  else
+    log "Dependency check: ca-certificates is available."
+  fi
+}
+
+install_docker() {
   if require_cmd docker; then
     log "Docker already installed: $(docker --version)"
     return
@@ -68,7 +176,7 @@ install_docker_if_missing() {
   log "Docker installed: $(docker --version)"
 }
 
-install_compose_if_missing() {
+install_docker_compose() {
   if docker compose version >/dev/null 2>&1; then
     log "Docker Compose already available: $(docker compose version | head -n 1)"
     return
@@ -96,7 +204,7 @@ install_compose_if_missing() {
   log "Docker Compose installed: $(docker compose version | head -n 1)"
 }
 
-clone_or_update_repo() {
+prepare_repo() {
   log "Preparing repository at ${INSTALL_DIR}"
 
   if [ -d "${INSTALL_DIR}/.git" ]; then
@@ -321,7 +429,7 @@ verify_stack() {
   fi
 }
 
-remove_project_resources() {
+uninstall_stack() {
   if ! require_cmd docker; then
     warn "Docker not found, skipping container/image/volume cleanup."
     return
@@ -388,18 +496,10 @@ confirm_uninstall_if_needed() {
 }
 
 install_flow() {
-  if ! require_cmd curl; then
-    err "curl is required but not found."
-    exit 1
-  fi
-  if ! require_cmd git; then
-    err "git is required but not found. Please install git first."
-    exit 1
-  fi
-
-  install_docker_if_missing
-  install_compose_if_missing
-  clone_or_update_repo
+  install_base_dependencies
+  install_docker
+  install_docker_compose
+  prepare_repo
   prepare_env
   prompt_required_env
   start_stack
@@ -423,7 +523,7 @@ MSG
 
 uninstall_flow() {
   confirm_uninstall_if_needed
-  remove_project_resources
+  uninstall_stack
   remove_project_directory
 
   cat <<MSG
