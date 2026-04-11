@@ -1,0 +1,40 @@
+services:
+  remnashop:
+    build: .
+    container_name: remnashop-pro
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-UTC}
+      REMNASHOP_CONFIG: /data/config.json
+      REMNASHOP_DB: /data/starlight.db
+      ADMIN_ID: ${ADMIN_ID:-}
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      PANEL_URL: ${PANEL_URL:-}
+      PANEL_TOKEN: ${PANEL_TOKEN:-}
+      SUB_DOMAIN: ${SUB_DOMAIN:-}
+      GROUP_UUID: ${GROUP_UUID:-}
+      PANEL_VERIFY_TLS: ${PANEL_VERIFY_TLS:-true}
+    volumes:
+      - remnashop-data:/data
+    healthcheck:
+      test: ["CMD", "python", "docker/healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+volumes:
+  remnashop-data:
