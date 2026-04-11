@@ -7,7 +7,7 @@ import asyncio
 import qrcode
 from io import BytesIO
 from collections import defaultdict
-from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_user_by_telegram_id as api_get_user_by_telegram_id, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_realtime as api_get_bandwidth_nodes_realtime, bulk_move_users_to_squad as api_bulk_move_users_to_squad, create_user as api_create_user, patch_user as api_patch_user, delete_user as api_delete_user, enable_user as api_enable_user, disable_user as api_disable_user, reset_user_traffic as api_reset_user_traffic, get_subscription_request_history as api_get_subscription_request_history, bulk_delete_users as api_bulk_delete_users, bulk_update_users as api_bulk_update_users, probe_api_capabilities as api_probe_api_capabilities, set_user_metadata as api_set_user_metadata, block_ip_address as api_block_ip_address, get_system_health as api_get_system_health, get_snippet_by_key as api_get_snippet_by_key, get_subscription_page_configs as api_get_subscription_page_configs, get_external_squads as api_get_external_squads, get_config_profiles as api_get_config_profiles, close_all_clients, extract_payload
+from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_user_by_telegram_id as api_get_user_by_telegram_id, get_user_by_username as api_get_user_by_username, get_user_by_short_uuid as api_get_user_by_short_uuid, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_realtime as api_get_bandwidth_nodes_realtime, bulk_move_users_to_squad as api_bulk_move_users_to_squad, create_user as api_create_user, patch_user as api_patch_user, delete_user as api_delete_user, enable_user as api_enable_user, disable_user as api_disable_user, reset_user_traffic as api_reset_user_traffic, get_subscription_request_history as api_get_subscription_request_history, bulk_delete_users as api_bulk_delete_users, bulk_update_users as api_bulk_update_users, probe_api_capabilities as api_probe_api_capabilities, set_user_metadata as api_set_user_metadata, block_ip_address as api_block_ip_address, get_system_health as api_get_system_health, get_system_stats as api_get_system_stats, get_system_stats_recap as api_get_system_stats_recap, get_snippet_by_key as api_get_snippet_by_key, get_subscription_page_configs as api_get_subscription_page_configs, get_external_squads as api_get_external_squads, get_config_profiles as api_get_config_profiles, get_user_accessible_nodes as api_get_user_accessible_nodes, close_all_clients, extract_payload
 from services.orders import (
     create_order,
     get_order,
@@ -77,6 +77,86 @@ order_payment_method_cache = {}
 panel_capabilities_cache = {}
 panel_capabilities_runtime_success = {}
 dynamic_snippets_cache = {}
+SUPPORT_REPLY_TTL_SECONDS = 1800
+
+
+def _get_support_session_store(application):
+    store = application.bot_data.get('support_reply_sessions')
+    if not isinstance(store, dict):
+        store = {}
+        application.bot_data['support_reply_sessions'] = store
+    return store
+
+
+def set_support_reply_session(context: ContextTypes.DEFAULT_TYPE, user_id: int, source: str, admin_id: int | None = None):
+    store = _get_support_session_store(context.application)
+    now_ts = int(time.time())
+    current = store.get(int(user_id)) if isinstance(store.get(int(user_id)), dict) else {}
+    store[int(user_id)] = {
+        'active': True,
+        'source': source,
+        'admin_id': int(admin_id) if admin_id else None,
+        'updated_at': now_ts,
+        'expire_at': now_ts + SUPPORT_REPLY_TTL_SECONDS,
+        'control_message_id': current.get('control_message_id'),
+    }
+
+
+def get_support_reply_session(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    store = _get_support_session_store(context.application)
+    sess = store.get(int(user_id))
+    if not isinstance(sess, dict):
+        return None
+    now_ts = int(time.time())
+    expire_at = int(sess.get('expire_at') or 0)
+    if expire_at and expire_at < now_ts:
+        store.pop(int(user_id), None)
+        logger.info("support reply context expired: user=%s expire_at=%s", user_id, expire_at)
+        return None
+    return sess
+
+
+def clear_support_reply_session(context: ContextTypes.DEFAULT_TYPE, user_id: int, reason: str):
+    store = _get_support_session_store(context.application)
+    existed = store.pop(int(user_id), None)
+    if existed:
+        logger.info("support reply context cleared: user=%s reason=%s", user_id, reason)
+
+
+async def delete_message_if_possible(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id):
+    if not message_id:
+        return False
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=int(message_id))
+        return True
+    except Exception as exc:
+        logger.debug("delete message skipped: chat=%s msg=%s err=%s", chat_id, message_id, exc)
+        return False
+
+
+async def upsert_support_control_message(context: ContextTypes.DEFAULT_TYPE, user_id: int, text: str, reply_markup):
+    store = _get_support_session_store(context.application)
+    sess = store.get(int(user_id)) if isinstance(store.get(int(user_id)), dict) else {}
+    msg_id = sess.get('control_message_id')
+    if msg_id:
+        try:
+            await context.bot.edit_message_text(chat_id=user_id, message_id=int(msg_id), text=text, parse_mode='Markdown', reply_markup=reply_markup)
+            return int(msg_id)
+        except Exception as exc:
+            logger.debug("edit support control message failed, fallback send new: user=%s msg=%s err=%s", user_id, msg_id, exc)
+    sent = await context.bot.send_message(chat_id=user_id, text=text, parse_mode='Markdown', reply_markup=reply_markup)
+    sess = sess if isinstance(sess, dict) else {}
+    sess['control_message_id'] = sent.message_id
+    sess['updated_at'] = int(time.time())
+    store[int(user_id)] = sess
+    return sent.message_id
+
+
+async def cleanup_admin_reply_prompt(context: ContextTypes.DEFAULT_TYPE, admin_id: int, admin_state: dict, reason: str):
+    prompt_id = admin_state.pop('reply_prompt_message_id', None)
+    if prompt_id:
+        ok = await delete_message_if_possible(context, admin_id, prompt_id)
+        logger.info("cleanup admin reply prompt: admin=%s prompt=%s reason=%s deleted=%s", admin_id, prompt_id, reason, ok)
 
 def get_short_id(real_uuid):
     for sid, uid in uuid_map.items():
@@ -97,7 +177,7 @@ def check_cooldown(user_id):
     return True
 
 def get_strategy_label(strategy):
-    mapping = {'NO_RESET': '总流量', 'DAY': '每日重置', 'WEEK': '每周重置', 'MONTH': '每月重置'}
+    mapping = {'NO_RESET': '总流量', 'DAY': '每日重置', 'WEEK': '每周重置', 'MONTH': '每月重置', 'MONTH_ROLLING': '按开通日每月重置'}
     return mapping.get(strategy, '总流量')
 
 def draw_progress_bar(used, total, length=10):
@@ -183,7 +263,7 @@ def capability_enabled(name: str, default=False):
         return str(explicit).strip().lower() in {"1", "true", "yes", "on", "开启", "开"}
     return bool(panel_capabilities_cache.get(key, default))
 
-def get_plan_price(plan_dict, payment_method='alipay'):
+def get_plan_price(plan_dict, payment_method='manual_review'):
     if payment_method == 'usdt':
         usdt_price = (plan_dict.get('usdt_price') or '').strip()
         if usdt_price:
@@ -191,31 +271,9 @@ def get_plan_price(plan_dict, payment_method='alipay'):
     return str(plan_dict.get('price') or '')
 
 def resolve_payment_state(payment_method):
-    alipay_enabled = get_setting_bool("alipay_enabled", True)
-    wechat_enabled = get_setting_bool("wechat_enabled", True)
     usdt_enabled = get_setting_bool("usdt_enabled", False)
-    alipay_token_enabled = get_setting_bool("alipay_token_enabled", True)
-    alipay_qr_enabled = get_setting_bool("alipay_qr_enabled", True)
-
-    if payment_method == "alipay":
-        method_label = "支付宝"
-        qr_file_id = get_setting_value("alipay_qr_file_id")
-        custom_tip = dynamic_snippets_cache.get("payment_alipay_tip", "")
-        if not alipay_enabled:
-            return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "管理员未配置收款，请等待管理配置收款。"}
-        if alipay_token_enabled:
-            return {'available': True, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': custom_tip or "请在下方直接发送 **支付宝口令红包**（文字）给机器人。"}
-        if alipay_qr_enabled and qr_file_id:
-            return {'available': True, 'method_label': method_label, 'should_send_qr': True, 'qr_file_id': qr_file_id, 'pay_tip': custom_tip or "请按下方支付宝收款码完成付款后，发送 **支付截图/备注** 给机器人。"}
-        return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "管理员未配置收款，请等待管理配置收款。"}
-
-    if payment_method == "wechat":
-        method_label = "微信支付"
-        qr_file_id = get_setting_value("wechat_qr_file_id")
-        custom_tip = dynamic_snippets_cache.get("payment_wechat_tip", "")
-        if wechat_enabled and qr_file_id:
-            return {'available': True, 'method_label': method_label, 'should_send_qr': True, 'qr_file_id': qr_file_id, 'pay_tip': custom_tip or "请按下方微信收款码完成付款后，发送 **支付截图/备注** 给机器人。"}
-        return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "管理员未配置收款，请等待管理配置收款。"}
+    if payment_method == "manual_review":
+        return {'available': True, 'method_label': "人工审核", 'should_send_qr': False, 'qr_file_id': None, 'pay_tip': "提交凭证后由管理员人工审核。"}
 
     if payment_method == "usdt":
         method_label = "USDT"
@@ -230,10 +288,9 @@ def resolve_payment_state(payment_method):
 
     return {'available': False, 'method_label': payment_method, 'should_send_qr': False, 'qr_file_id': None, 'pay_tip': "不支持的支付方式。"}
 def is_any_payment_available():
-    ali = resolve_payment_state('alipay')['available']
-    wx = resolve_payment_state('wechat')['available']
+    manual_review = resolve_payment_state('manual_review')['available']
     usdt = resolve_payment_state('usdt')['available']
-    return ali or wx or usdt
+    return manual_review or usdt
 
 
 def get_json_setting(key, default):
@@ -396,6 +453,14 @@ async def get_user_by_telegram_id(telegram_id):
     return await api_get_user_by_telegram_id(telegram_id, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
 
+async def get_user_by_username(username):
+    return await api_get_user_by_username(username, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_user_by_short_uuid(short_uuid):
+    return await api_get_user_by_short_uuid(short_uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
 async def get_nodes_status():
     return await api_get_nodes_status(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
@@ -421,6 +486,32 @@ async def get_internal_squads():
 
 async def get_internal_squad_accessible_nodes(uuid):
     return await api_get_internal_squad_accessible_nodes(uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+async def get_internal_squad_accessible_nodes_verbose(uuid):
+    if not PANEL_URL or not PANEL_TOKEN:
+        return [], 'config_missing'
+    resp = await safe_api_request('GET', f'/internal-squads/{uuid}/accessible-nodes')
+    if not resp:
+        return [], 'network_error'
+    if resp.status_code == 401:
+        return [], 'auth_unauthorized'
+    if resp.status_code == 403:
+        return [], 'auth_forbidden'
+    if resp.status_code == 404:
+        return [], 'endpoint_or_squad_not_found'
+    if resp.status_code != 200:
+        return [], f"http_{resp.status_code}"
+    payload = extract_payload(resp)
+    if isinstance(payload, list):
+        return payload, None
+    if isinstance(payload, dict):
+        nodes = payload.get('accessibleNodes')
+        if isinstance(nodes, list):
+            return nodes, None
+        nodes = payload.get('nodes')
+        if isinstance(nodes, list):
+            return nodes, None
+    return [], 'empty_payload'
 
 
 async def get_bandwidth_nodes_realtime():
@@ -485,6 +576,14 @@ async def get_panel_system_health():
     return await api_get_system_health(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
 
+async def get_panel_system_stats():
+    return await api_get_system_stats(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_panel_system_stats_recap():
+    return await api_get_system_stats_recap(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
 async def get_panel_snippet(key):
     return await api_get_snippet_by_key(key, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
@@ -501,6 +600,10 @@ async def get_panel_config_profiles():
     return await api_get_config_profiles(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
 
+async def get_user_accessible_nodes(uuid):
+    return await api_get_user_accessible_nodes(uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
 async def refresh_panel_capabilities():
     global panel_capabilities_cache
     panel_capabilities_cache = await api_probe_api_capabilities(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
@@ -514,7 +617,7 @@ async def refresh_panel_capabilities():
 
 async def refresh_dynamic_snippets():
     global dynamic_snippets_cache
-    keys = ["payment_alipay_tip", "payment_wechat_tip", "payment_usdt_tip", "support_contact_tip"]
+    keys = ["payment_usdt_tip", "support_contact_tip"]
     rows = {}
     for key in keys:
         payload = await get_panel_snippet(key)
@@ -631,21 +734,51 @@ def detect_bandwidth_volatility(nodes_rt):
     return alerts
 
 
-async def send_or_edit_menu(update, context, text, reply_markup):
+async def send_or_edit_menu(update, context, text, reply_markup, parse_mode='Markdown'):
+    async def _safe_send(chat_id, body, markup, mode):
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=body, reply_markup=markup, parse_mode=mode)
+        except Exception as exc:
+            if mode is not None:
+                logger.warning("send_message failed with parse_mode=%s, fallback plain text: %s", mode, exc)
+                await context.bot.send_message(chat_id=chat_id, text=body, reply_markup=markup)
+            else:
+                raise
+
     if update.callback_query:
         try:
-            await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode='Markdown')
-        except Exception:
+            await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except Exception as exc:
+            if parse_mode is not None:
+                logger.warning("edit_message_text failed with parse_mode=%s, fallback plain text: %s", parse_mode, exc)
+                try:
+                    await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup)
+                    return
+                except Exception:
+                    pass
             try: await update.callback_query.delete_message()
             except Exception as exc:
                 logger.debug("delete callback message failed: %s", exc)
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='Markdown')
+            await _safe_send(update.effective_chat.id, text, reply_markup, parse_mode)
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='Markdown')
+        await _safe_send(update.effective_chat.id, text, reply_markup, parse_mode)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     user_id = update.effective_user.id
+    support_ctx = get_support_reply_session(context, user_id)
+    if support_ctx and support_ctx.get('control_message_id'):
+        try:
+            await context.bot.edit_message_text(
+                chat_id=user_id,
+                message_id=int(support_ctx.get('control_message_id')),
+                text="✅ 客服会话已结束。若需继续，请点击“联系客服”。",
+                parse_mode='Markdown',
+                reply_markup=None,
+            )
+        except Exception as exc:
+            logger.debug("close support control prompt failed: user=%s err=%s", user_id, exc)
+    clear_support_reply_session(context, user_id, reason='enter_start_menu')
     args = getattr(context, 'args', None) or []
     if args:
         raw = str(args[0]).strip()
@@ -686,7 +819,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📈 带宽看板", callback_data="admin_bandwidth_dashboard"), InlineKeyboardButton("🛡️ 风控策略", callback_data="admin_risk_policy")],
             [InlineKeyboardButton("🕒 操作时间线", callback_data="admin_ops_timeline"), InlineKeyboardButton("📢 群发通知", callback_data="admin_broadcast_start")],
             [InlineKeyboardButton("💳 收款设置", callback_data="admin_pay_settings"), InlineKeyboardButton("🔌 面板配置", callback_data="admin_panel_config")],
-            [InlineKeyboardButton("🧩 模板中心", callback_data="admin_template_center"), InlineKeyboardButton("🗂 批量任务", callback_data="admin_bulk_jobs")]
+            [InlineKeyboardButton("🧩 模板中心", callback_data="admin_template_center"), InlineKeyboardButton("🗂 批量任务", callback_data="admin_bulk_jobs")],
+            [InlineKeyboardButton("🔎 面板用户检索", callback_data="admin_panel_user_lookup"), InlineKeyboardButton("🖥 系统面板", callback_data="admin_system_dashboard")]
         ]
     else:
         msg_text = "👋 **欢迎使用自助服务！**\n请选择操作："
@@ -735,104 +869,23 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data == "contact_support":
         context.user_data['chat_mode'] = 'support'
+        support_ctx = {'source': 'user_initiated', 'updated_at': int(time.time())}
+        context.user_data['support_reply_context'] = support_ctx
+        set_support_reply_session(context, user_id, source='user_initiated')
+        if query.message:
+            store = _get_support_session_store(context.application)
+            sess = store.get(int(user_id), {})
+            if isinstance(sess, dict):
+                sess['control_message_id'] = query.message.message_id
+                store[int(user_id)] = sess
+        logger.info("user entered support mode: user=%s source=user_initiated", user_id)
         msg = dynamic_snippets_cache.get("support_contact_tip") or "📞 **客服模式已开启**\n请直接发送文字、图片或文件。\n🚪 结束咨询请点击下方按钮。"
         keyboard = [[InlineKeyboardButton("🚪 结束咨询", callback_data="back_home")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
         return
 
     if data == "client_pay_done_upload":
-        pending = get_pending_order_for_user(db_query, user_id)
-        if not pending:
-            await query.answer("当前没有待提交审核的订单", show_alert=True)
-            return
-
-        pay_method = order_payment_method_cache.get(pending['order_id'], 'alipay')
-        pay_state = resolve_payment_state(pay_method)
-        if not pay_state['available']:
-            await query.answer("当前支付方式不可用，请等待管理员配置收款。", show_alert=True)
-            return
-
-        proof = context.user_data.get('pending_payment_proof')
-        if not proof or proof.get('order_id') != pending['order_id']:
-            await query.answer("请先发送支付截图/文件/口令，再点击此按钮提交。", show_alert=True)
-            return
-
-        plan = db_query("SELECT * FROM plans WHERE key = ?", (pending['plan_key'],), one=True)
-        if not plan:
-            await query.answer("订单套餐已失效，请重新下单", show_alert=True)
-            update_order_status(db_execute, pending['order_id'], [STATUS_PENDING], STATUS_FAILED, error_message='plan_deleted')
-            context.user_data.pop('pending_payment_proof', None)
-            return
-
-        t_str = "续费" if pending['order_type'] == 'renew' else "新购"
-        pay_label = "支付宝" if pay_method == 'alipay' else "微信支付"
-        target_uuid = pending['target_uuid'] if pending['target_uuid'] else "0"
-        sid = get_short_id(target_uuid) if target_uuid != "0" else "0"
-        kb = [
-            [InlineKeyboardButton("✅ 通过", callback_data=f"ap_{pending['order_id']}_{sid}")],
-            [InlineKeyboardButton("❌ 拒绝", callback_data=f"rj_{pending['order_id']}")],
-            [InlineKeyboardButton("📨 给用户发消息", callback_data=f"reply_user_{user_id}_{pending['order_id']}")],
-        ]
-
-        proof_type = proof.get('type')
-        proof_text = proof.get('text') or '[图片/文件]'
-        admin_message = None
-        if proof_type == 'text':
-            escaped_text = escape_markdown_v2(proof_text)
-            admin_msg = (
-                f"*💰 审核 {escape_markdown_v2(t_str)}*\n"
-                f"👤 用户ID: `{user_id}`\n"
-                f"📦 套餐: `{escape_markdown_v2(dict(plan)['name'])}`\n"
-                f"💳 支付方式: `{escape_markdown_v2(pay_label)}`\n"
-                f"🏷 渠道码: `{escape_markdown_v2(str(pending.get('channel_code') or '-'))}`\n"
-                f"📝 口令/说明: `{escaped_text}`"
-            )
-            admin_message = await context.bot.send_message(
-                ADMIN_ID,
-                admin_msg,
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode='MarkdownV2',
-            )
-        else:
-            caption = (
-                f"💰 审核 {t_str}\n"
-                f"👤 用户ID: {user_id}\n"
-                f"📦 套餐: {dict(plan)['name']}\n"
-                f"💳 支付方式: {pay_label}\n"
-                f"🏷 渠道码: {pending.get('channel_code') or '-'}\n"
-                f"📎 用户已提交支付凭证图片/文件"
-            )
-            if proof_type == 'photo' and proof.get('file_id'):
-                admin_message = await context.bot.send_photo(
-                    ADMIN_ID,
-                    photo=proof['file_id'],
-                    caption=caption,
-                    reply_markup=InlineKeyboardMarkup(kb),
-                )
-            elif proof_type == 'document' and proof.get('file_id'):
-                admin_message = await context.bot.send_document(
-                    ADMIN_ID,
-                    document=proof['file_id'],
-                    caption=caption,
-                    reply_markup=InlineKeyboardMarkup(kb),
-                )
-
-        if not admin_message:
-            await query.answer("凭证读取失败，请重新发送后再提交", show_alert=True)
-            return
-
-        context.user_data.pop('pending_payment_proof', None)
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-        msg_obj = await query.message.reply_text(
-            "✅ 已提交，等待管理员审核。",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]),
-        )
-        attach_admin_message(db_execute, pending['order_id'], admin_message.message_id)
-        attach_payment_text(db_execute, pending['order_id'], f"方式:{pay_label}|{proof_text}", waiting_message_id=msg_obj.message_id)
-        await query.answer("提交成功", show_alert=True)
+        await query.answer("✅ 已切换为“发送凭证即提交审核”，请直接发送支付凭证。", show_alert=True)
         return
 
 
@@ -1026,6 +1079,10 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     elif data.startswith("order_"):
         parts = data.split("_")
+        if len(parts) < 4:
+            logger.warning("Invalid order callback payload: %s", data)
+            await query.answer("参数错误，请重试", show_alert=True)
+            return
         plan_key = parts[1]
         order_type = parts[2]
         if order_type == 'renew':
@@ -1035,14 +1092,26 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         await show_payment_method_menu(update, context, plan_key, order_type, short_id)
 
+    elif data.startswith("manualreview_"):
+        parts = data.split("_", 3)
+        if len(parts) < 4:
+            logger.warning("Invalid manualreview callback payload: %s", data)
+            await query.answer("参数错误", show_alert=True)
+            return
+        _, plan_key, order_type, short_id = parts
+        await handle_order_confirmation(update, context, plan_key, order_type, short_id, payment_method='manual_review')
+
     elif data.startswith("paymethod_"):
-        # paymethod_{alipay|wechat}_{plan_key}_{order_type}_{short_id}
         parts = data.split("_", 4)
         if len(parts) < 5:
-            await query.answer("参数错误")
+            logger.warning("Invalid paymethod callback payload: %s", data)
+            await query.answer("参数错误", show_alert=True)
             return
         _, pay_method, plan_key, order_type, short_id = parts
-        await handle_order_confirmation(update, context, plan_key, order_type, short_id, payment_method=pay_method)
+        if pay_method != "usdt":
+            await query.answer("当前客户端仅支持 人工审核 / USDT。", show_alert=True)
+            return
+        await handle_order_confirmation(update, context, plan_key, order_type, short_id, payment_method='usdt')
 
     elif data == "cancel_order":
         pending = get_pending_order_for_user(db_query, user_id)
@@ -1052,36 +1121,113 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await start(update, context)
 
 async def show_payment_method_menu(update, context, plan_key, order_type, short_id):
-    if payment_method == 'usdt' and not (str(plan_dict.get('usdt_price') or '').strip()):
-        await send_or_edit_menu(update, context, "⚠️ 当前套餐未配置 USDT 金额，请联系管理员。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+    plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
+    if not plan:
+        await send_or_edit_menu(update, context, "⚠️ 套餐不存在或已下架，请返回重新选择。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         return
+    plan_dict = dict(plan)
 
     type_str = "续费" if order_type == 'renew' else "新购"
 
-    if not is_any_payment_available():
-        msg = "⚠️ 管理员未配置收款，请等待管理配置收款。"
-        kb = [[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
-        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
-        return
-
-    msg = f"💳 **选择支付方式（{type_str}）**\n请选择收款方式："
-    kb = []
-    if resolve_payment_state('alipay')['available']:
-        kb.append([InlineKeyboardButton("🟦 支付宝", callback_data=f"paymethod_alipay_{plan_key}_{order_type}_{short_id}")])
-    if resolve_payment_state('wechat')['available']:
-        kb.append([InlineKeyboardButton("🟩 微信支付", callback_data=f"paymethod_wechat_{plan_key}_{order_type}_{short_id}")])
-    if resolve_payment_state('usdt')['available'] and usdt_plan_ready:
+    msg = (
+        f"🧾 **下单确认（{type_str}）**\n"
+        f"📦 套餐：{plan_dict['name']}\n"
+        f"💰 金额：{plan_dict.get('price')}\n"
+        f"📡 流量：{plan_dict.get('gb')} GB\n\n"
+        "请选择下一步："
+    )
+    kb = [[InlineKeyboardButton("🧾 人工审核", callback_data=f"manualreview_{plan_key}_{order_type}_{short_id}")]]
+    if resolve_payment_state('usdt')['available'] and str(plan_dict.get('usdt_price') or '').strip():
         kb.append([InlineKeyboardButton("🟨 USDT", callback_data=f"paymethod_usdt_{plan_key}_{order_type}_{short_id}")])
-    if not kb:
-        msg = "⚠️ 当前套餐暂无可用收款方式（USDT 需要先配置该套餐的 USDT 金额）。"
-        kb = [[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]
-        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
-        return
     kb.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
     await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
 
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    err = context.error
+    if isinstance(update, Update) and update.callback_query:
+        callback_data = update.callback_query.data
+        user_id = update.callback_query.from_user.id
+        logger.exception("Unhandled callback exception: user_id=%s callback_data=%s error=%s", user_id, callback_data, err)
+        try:
+            await update.callback_query.answer("⚠️ 系统异常，请稍后重试。", show_alert=True)
+        except Exception:
+            pass
+        return
+    logger.exception("Unhandled telegram update exception: %s", err)
 
-async def handle_order_confirmation(update, context, plan_key, order_type, short_id, payment_method='alipay'):
+async def submit_manual_review_proof(update: Update, context: ContextTypes.DEFAULT_TYPE, pending_order: dict, proof: dict):
+    user_id = int(pending_order['tg_id'])
+    order_id = pending_order['order_id']
+    plan = db_query("SELECT * FROM plans WHERE key = ?", (pending_order['plan_key'],), one=True)
+    if not plan:
+        update_order_status(db_execute, order_id, [STATUS_PENDING], STATUS_FAILED, error_message='plan_deleted')
+        await update.message.reply_text("❌ 套餐已失效，订单已关闭，请重新下单。")
+        return
+
+    plan_dict = dict(plan)
+    strategy_label = get_strategy_label(plan_dict.get('reset_strategy', 'NO_RESET'))
+    type_str = "续费" if pending_order['order_type'] == 'renew' else "新购"
+    selected_path = order_payment_method_cache.get(order_id, 'manual_review')
+    selected_path_label = "USDT" if selected_path == "usdt" else "人工审核"
+    target_uuid = pending_order['target_uuid'] if pending_order['target_uuid'] else "0"
+    sid = get_short_id(target_uuid) if target_uuid != "0" else "0"
+    username = update.effective_user.username or "-"
+    proof_type = proof.get('type')
+    proof_text = (proof.get('text') or '').strip()
+    if not proof_text:
+        proof_text = "[图片/文件]"
+
+    kb = [
+        [InlineKeyboardButton("✅ 通过", callback_data=f"ap_{order_id}_{sid}")],
+        [InlineKeyboardButton("❌ 拒绝", callback_data=f"rj_{order_id}")],
+        [InlineKeyboardButton("📨 给用户发消息", callback_data=f"reply_user_{user_id}_{order_id}")],
+    ]
+    caption = (
+        f"🧾 人工审核订单\n"
+        f"🆔 订单号: {order_id}\n"
+        f"👤 用户ID: {user_id} (@{username})\n"
+        f"📦 套餐: {plan_dict['name']}\n"
+        f"💰 金额: {plan_dict.get('price')}\n"
+        f"📡 流量: {plan_dict.get('gb')} GB ({strategy_label})\n"
+        f"🧩 类型: {type_str}\n"
+        f"🛣 路径: {selected_path_label}\n"
+        f"🏷 渠道码: {pending_order.get('channel_code') or '-'}\n"
+        f"📝 用户凭证: {proof_text}"
+    )
+
+    admin_message = None
+    if proof_type == 'text':
+        admin_message = await context.bot.send_message(ADMIN_ID, caption, reply_markup=InlineKeyboardMarkup(kb))
+    elif proof_type == 'photo' and proof.get('file_id'):
+        admin_message = await context.bot.send_photo(ADMIN_ID, photo=proof['file_id'], caption=caption, reply_markup=InlineKeyboardMarkup(kb))
+    elif proof_type == 'document' and proof.get('file_id'):
+        admin_message = await context.bot.send_document(ADMIN_ID, document=proof['file_id'], caption=caption, reply_markup=InlineKeyboardMarkup(kb))
+    else:
+        await update.message.reply_text("⚠️ 未识别的凭证格式，请发送文字、图片或文件。")
+        return
+
+    append_order_audit_log(db_execute, order_id, 'submit_manual_review', user_id, f"proof_type={proof_type}")
+    attach_admin_message(db_execute, order_id, admin_message.message_id)
+    attach_payment_text(db_execute, order_id, f"方式:{selected_path_label}|{proof_text}")
+    context.user_data.pop('pending_payment_proof', None)
+    context.user_data.pop('awaiting_manual_review_proof_order_id', None)
+    await update.message.reply_text(
+        "✅ 已提交人工审核，请等待管理员处理。",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]),
+    )
+
+
+async def cleanup_panelcfg_prompt_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    msg_id = context.user_data.pop('panelcfg_prompt_message_id', None)
+    if not msg_id:
+        return
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+    except Exception as exc:
+        logger.debug("failed to cleanup panelcfg prompt message %s: %s", msg_id, exc)
+
+
+async def handle_order_confirmation(update, context, plan_key, order_type, short_id, payment_method='manual_review'):
     user_id = update.effective_user.id
     target_uuid = get_real_uuid(short_id) if short_id != "0" else "0"
 
@@ -1092,33 +1238,7 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
     plan_dict = dict(plan)
     strategy = plan_dict.get('reset_strategy', 'NO_RESET')
     strategy_label = get_strategy_label(strategy)
-
     type_str = "续费" if order_type == 'renew' else "新购"
-    back_data = f"view_sub_{short_id}" if order_type == 'renew' else "client_buy_new"
-    keyboard = [
-        [InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")],
-        [InlineKeyboardButton("🔙 返回", callback_data=back_data)],
-    ]
-
-    pay_state = resolve_payment_state(payment_method)
-    method_label = pay_state['method_label']
-    pay_tip = pay_state['pay_tip']
-    should_send_qr = pay_state['should_send_qr']
-    qr_file_id = pay_state['qr_file_id']
-
-    show_price = get_plan_price(plan_dict, payment_method)
-    msg = (
-        f"📝 **订单确认 ({type_str})**\n"
-        f"📦 套餐：{plan_dict['name']}\n"
-        f"💰 金额：**{show_price}**\n"
-        f"📡 流量：**{plan_dict['gb']} GB ({strategy_label})**\n"
-        f"💳 支付方式：**{method_label}**\n\n"
-        f"💳 **下一步：**\n{pay_tip}"
-    )
-
-    if not pay_state['available']:
-        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
-        return
 
     msg_id = None
     if update.callback_query and update.callback_query.message:
@@ -1127,39 +1247,36 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
     order, created = create_order(db_query, db_execute, user_id, plan_key, order_type, target_uuid, menu_message_id=msg_id, channel_code=context.user_data.get('channel_code'))
     if created:
         append_order_audit_log(db_execute, order['order_id'], 'create', user_id, f"type={order_type};plan={plan_key};channel={context.user_data.get('channel_code') or '-'}")
-        order_payment_method_cache[order["order_id"]] = payment_method
+        selected_path = "usdt" if payment_method == "usdt" else "manual_review"
+        order_payment_method_cache[order["order_id"]] = selected_path
+        context.user_data['awaiting_manual_review_proof_order_id'] = order['order_id']
         context.user_data.pop('pending_payment_proof', None)
     else:
         msg = "⚠️ 你已有一个待审核订单，请先等待管理员处理，或取消后重新下单。"
-        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         return
-
-    if should_send_qr and qr_file_id:
-        try:
-            await context.bot.send_photo(
-                chat_id=user_id,
-                photo=qr_file_id,
-                caption=f"{msg}\n\n👇 请先发送支付凭证，发送后系统会出现提交按钮。",
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-            if update.callback_query and update.callback_query.message:
-                try:
-                    await update.callback_query.message.delete()
-                except Exception:
-                    pass
+    path_label = "USDT" if payment_method == "usdt" else "人工审核"
+    extra_tip = "👇 请直接在聊天中发送支付凭证（文字说明、截图、图片或文件），发送后会自动提交人工审核。"
+    if payment_method == "usdt":
+        usdt_info = resolve_payment_state('usdt')
+        usdt_price = str(plan_dict.get('usdt_price') or '').strip()
+        if not usdt_info['available'] or not usdt_price:
+            await send_or_edit_menu(update, context, "⚠️ 当前 USDT 未配置完整，请选择人工审核。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
             return
-        except Exception as exc:
-            logger.warning("发送收款码失败: %s", exc)
-            msg += "\n\n⚠️ 当前收款码未能发送，请联系管理员。"
-
-    msg += "\n\n👇 请先发送支付凭证，发送后系统会出现提交按钮。"
-    await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
-    if created and qr_file_id:
-        try:
-            await context.bot.send_photo(chat_id=user_id, photo=qr_file_id, caption=f"📌 当前收款码：{method_label}")
-        except Exception as exc:
-            logger.warning("发送收款码失败: %s", exc)
+        extra_tip = f"💰 USDT 金额：**{usdt_price} USDT**\n{usdt_info['pay_tip']}\n\n👇 完成后请发送 TXID/截图/说明，发送后会自动提交人工审核。"
+    msg = (
+        f"📝 **订单已创建**\n"
+        f"🆔 订单号：`{order['order_id']}`\n"
+        f"📦 套餐：{plan_dict['name']}\n"
+        f"💰 金额：**{plan_dict.get('price')}**\n"
+        f"📡 流量：**{plan_dict['gb']} GB ({strategy_label})**\n"
+        f"🧩 类型：**{type_str}**\n"
+        f"🧾 路径：**{path_label}**\n\n"
+        f"🆔 系统将自动使用当前 Telegram ID：`{user_id}`\n"
+        f"{extra_tip}"
+    )
+    kb = [[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")], [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]
+    await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
 
 async def show_plans_menu(update, context):
     plans = db_query("SELECT * FROM plans")
@@ -1256,6 +1373,9 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # 只要离开“回复输入模式”，就清理回复上下文，避免串场
     if not data.startswith("reply_user_"):
+        if 'reply_to_uid' in context.user_data:
+            logger.info("admin reply mode cleared by callback: admin=%s callback=%s", query.from_user.id, data)
+        await cleanup_admin_reply_prompt(context, query.from_user.id, context.user_data, reason=f'callback:{data}')
         context.user_data.pop('reply_to_uid', None)
         context.user_data.pop('reply_back_cb', None)
     
@@ -1270,16 +1390,20 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             uid_part, back_cb = raw, "back_home"
         target_uid = int(uid_part)
+        await cleanup_admin_reply_prompt(context, query.from_user.id, context.user_data, reason='enter_new_reply_mode')
         context.user_data['reply_to_uid'] = target_uid
         context.user_data['reply_back_cb'] = back_cb
+        logger.info("admin enter send-to-user mode: admin=%s target_user=%s back_cb=%s", query.from_user.id, target_uid, back_cb)
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回上一页", callback_data=back_cb)]])
-        await query.message.reply_text(f"✍️ 请输入回复给用户 `{target_uid}` 的内容 (文字/图片)：", parse_mode='Markdown', reply_markup=cancel_kb)
+        prompt_msg = await query.message.reply_text(f"✍️ 请输入回复给用户 `{target_uid}` 的内容 (文字/图片)：", parse_mode='Markdown', reply_markup=cancel_kb)
+        context.user_data['reply_prompt_message_id'] = prompt_msg.message_id
         return
     if data == "cancel_op":
         context.user_data.clear()
         await start(update, context)
         return
     if data == "admin_panel_config":
+        context.user_data.pop('panelcfg_prompt_message_id', None)
         masked = PANEL_TOKEN[:6] + "***" if PANEL_TOKEN else "未配置"
         msg = (
             "🔌 **面板对接配置**\n"
@@ -1310,6 +1434,8 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         }
         key, tip = mode_map[data]
         context.user_data[key] = True
+        if query.message:
+            context.user_data['panelcfg_prompt_message_id'] = query.message.message_id
         await send_or_edit_menu(update, context, f"✍️ {tip}", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_panel_config")]]))
         return
     if data == "panelcfg_toggle_tls":
@@ -1356,7 +1482,12 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return
             payload = json.loads(dict(row).get('payload_json') or '{}')
             apply_template_payload(payload, actor=query.from_user.id)
-            await query.answer("✅ 已应用自定义模板", show_alert=True)
+            await send_or_edit_menu(
+                update,
+                context,
+                f"✅ 已应用自定义模板：{dict(row).get('name', f'#{sid}')}\n相关参数已写入设置。",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回模板中心", callback_data="admin_template_center")], [InlineKeyboardButton("🏠 返回主页", callback_data="back_home")]]),
+            )
             return
         builtins = get_builtin_templates()
         tpl = builtins.get(key)
@@ -1364,7 +1495,72 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.answer("模板不存在", show_alert=True)
             return
         apply_template_payload(tpl, actor=query.from_user.id)
-        await query.answer("✅ 模板已应用", show_alert=True)
+        await send_or_edit_menu(
+            update,
+            context,
+            f"✅ 已应用模板：{tpl.get('name', key)}\n相关参数已写入设置。",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回模板中心", callback_data="admin_template_center")], [InlineKeyboardButton("🏠 返回主页", callback_data="back_home")]]),
+        )
+        return
+    if data == "admin_panel_user_lookup":
+        context.user_data['panel_user_lookup_mode'] = True
+        tip = (
+            "🔎 **面板用户检索/绑定**\n"
+            "请输入以下任一格式：\n"
+            "- `tg:123456789`（按 Telegram ID）\n"
+            "- `username:alice`（按用户名）\n"
+            "- `uuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`\n"
+            "- `short:abcd1234`（短 UUID）\n"
+            "- 或直接输入纯数字（自动按 Telegram ID）。"
+        )
+        kb = [[InlineKeyboardButton("🔙 取消", callback_data="back_home")]]
+        await send_or_edit_menu(update, context, tip, InlineKeyboardMarkup(kb))
+        return
+    if data.startswith("bind_panel_user_"):
+        parts = data.split("_", 4)
+        if len(parts) < 5:
+            await query.answer("参数错误", show_alert=True)
+            return
+        _, _, _, tg_text, panel_uuid = parts
+        try:
+            target_tg_id = int(tg_text)
+        except ValueError:
+            await query.answer("TG ID 格式错误", show_alert=True)
+            return
+        exists = db_query("SELECT 1 FROM subscriptions WHERE tg_id=? AND uuid=? LIMIT 1", (target_tg_id, panel_uuid), one=True)
+        if not exists:
+            db_execute("INSERT INTO subscriptions (tg_id, uuid, created_at) VALUES (?, ?, ?)", (target_tg_id, panel_uuid, int(time.time())))
+        await send_or_edit_menu(
+            update,
+            context,
+            f"✅ 绑定完成\nTG ID: `{target_tg_id}`\nUUID: `{panel_uuid}`",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔎 继续检索", callback_data="admin_panel_user_lookup")], [InlineKeyboardButton("🏠 返回主页", callback_data="back_home")]]),
+        )
+        return
+    if data == "admin_system_dashboard":
+        health = await get_panel_system_health()
+        stats = await get_panel_system_stats()
+        recap = await get_panel_system_stats_recap()
+        lines = ["🖥 **系统面板（基础）**"]
+        if health:
+            lines.append(f"健康信息字段: `{len(health.keys())}` 项")
+            for k in list(health.keys())[:6]:
+                lines.append(f"- {k}: {str(health.get(k))[:60]}")
+        else:
+            lines.append("- ⚠️ 系统健康信息不可用（可能是配置/权限/连通性问题）")
+        if stats:
+            lines.append(f"\n统计字段: `{len(stats.keys())}` 项")
+            for k in list(stats.keys())[:8]:
+                lines.append(f"- {k}: {str(stats.get(k))[:60]}")
+        else:
+            lines.append("\n- ⚠️ /system/stats 不可用")
+        if recap:
+            lines.append(f"\nRecap字段: `{len(recap.keys())}` 项")
+            for k in list(recap.keys())[:6]:
+                lines.append(f"- {k}: {str(recap.get(k))[:60]}")
+        else:
+            lines.append("- ⚠️ /system/stats/recap 不可用")
+        await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         return
     if data == "admin_bulk_jobs":
         rows = db_query("SELECT * FROM bulk_jobs ORDER BY created_at DESC LIMIT 20")
@@ -1378,60 +1574,17 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         return
     if data == "admin_pay_settings":
-        alipay_enabled = get_setting_bool("alipay_enabled", True)
-        wechat_enabled = get_setting_bool("wechat_enabled", True)
         usdt_enabled = get_setting_bool("usdt_enabled", False)
         msg = (
             "💳 **收款设置**\n"
-            f"🟦 支付宝：{'已开启' if alipay_enabled else '已关闭'}\n"
-            f"🟩 微信支付：{'已开启' if wechat_enabled else '已关闭'}\n"
+            "🧾 人工审核：始终可用（用户提交凭证后人工审核）\n"
             f"🟨 USDT：{'已开启' if usdt_enabled else '已关闭'}\n\n"
             "请选择下方配置项。"
         )
         kb = [
-            [InlineKeyboardButton("🟦 支付宝配置", callback_data="admin_pay_alipay_cfg")],
-            [InlineKeyboardButton("🟩 微信配置", callback_data="admin_pay_wechat_cfg")],
             [InlineKeyboardButton("🟨 USDT 配置", callback_data="admin_pay_usdt_cfg")],
             [InlineKeyboardButton("🧪 支付设置自检", callback_data="admin_pay_self_check")],
             [InlineKeyboardButton("🔙 返回", callback_data="back_home")],
-        ]
-        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
-        return
-
-    if data == "admin_pay_alipay_cfg":
-        alipay_enabled = get_setting_bool("alipay_enabled", True)
-        token_enabled = get_setting_bool("alipay_token_enabled", True)
-        qr_enabled = get_setting_bool("alipay_qr_enabled", True)
-        ali_qr = "已上传" if get_setting_value("alipay_qr_file_id") else "未上传"
-        msg = (
-            "🟦 **支付宝配置**\n"
-            f"总开关：{'开启' if alipay_enabled else '关闭'}\n"
-            f"口令收款：{'开启' if token_enabled else '关闭'}\n"
-            f"收款码收款：{'开启' if qr_enabled else '关闭'}\n"
-            f"收款码图片：{ali_qr}"
-        )
-        kb = [
-            [InlineKeyboardButton("🔘 切换支付宝总开关", callback_data="toggle_pay_alipay")],
-            [InlineKeyboardButton("🔤 切换口令收款", callback_data="toggle_pay_alipay_token")],
-            [InlineKeyboardButton("🖼 切换收款码收款", callback_data="toggle_pay_alipay_qr")],
-            [InlineKeyboardButton("⬆️ 上传支付宝收款码", callback_data="set_payimg_alipay")],
-            [InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")],
-        ]
-        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
-        return
-
-    if data == "admin_pay_wechat_cfg":
-        wechat_enabled = get_setting_bool("wechat_enabled", True)
-        wx_qr = "已上传" if get_setting_value("wechat_qr_file_id") else "未上传"
-        msg = (
-            "🟩 **微信配置**\n"
-            f"微信支付开关：{'开启' if wechat_enabled else '关闭'}\n"
-            f"收款码图片：{wx_qr}"
-        )
-        kb = [
-            [InlineKeyboardButton("🔘 切换微信支付开关", callback_data="toggle_pay_wechat")],
-            [InlineKeyboardButton("⬆️ 上传微信收款码", callback_data="set_payimg_wechat")],
-            [InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")],
         ]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
         return
@@ -1475,51 +1628,12 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_or_edit_menu(update, context, "✍️ 请输入 USDT 收款地址", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_pay_usdt_cfg")]]))
         return
 
-    if data == "toggle_pay_alipay":
-        next_val = not get_setting_bool("alipay_enabled", True)
-        set_setting_value("alipay_enabled", "1" if next_val else "0")
-        await query.answer(f"✅ 支付宝已{'开启' if next_val else '关闭'}", show_alert=True)
-        await send_or_edit_menu(update, context, "✅ 已更新支付宝总开关。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回支付宝配置", callback_data="admin_pay_alipay_cfg")]]))
-        return
-
-    if data == "toggle_pay_alipay_token":
-        next_val = not get_setting_bool("alipay_token_enabled", True)
-        set_setting_value("alipay_token_enabled", "1" if next_val else "0")
-        await query.answer(f"✅ 口令收款已{'开启' if next_val else '关闭'}", show_alert=True)
-        await send_or_edit_menu(update, context, "✅ 已更新支付宝口令收款开关。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回支付宝配置", callback_data="admin_pay_alipay_cfg")]]))
-        return
-
-    if data == "toggle_pay_alipay_qr":
-        next_val = not get_setting_bool("alipay_qr_enabled", True)
-        set_setting_value("alipay_qr_enabled", "1" if next_val else "0")
-        await query.answer(f"✅ 收款码收款已{'开启' if next_val else '关闭'}", show_alert=True)
-        await send_or_edit_menu(update, context, "✅ 已更新支付宝收款码收款开关。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回支付宝配置", callback_data="admin_pay_alipay_cfg")]]))
-        return
-
-    if data == "toggle_pay_wechat":
-        next_val = not get_setting_bool("wechat_enabled", True)
-        set_setting_value("wechat_enabled", "1" if next_val else "0")
-        await query.answer(f"✅ 微信支付已{'开启' if next_val else '关闭'}", show_alert=True)
-        await send_or_edit_menu(update, context, "✅ 已更新微信支付开关。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回微信配置", callback_data="admin_pay_wechat_cfg")]]))
-        return
-
     if data == "admin_pay_self_check":
-        alipay_enabled = get_setting_bool("alipay_enabled", True)
-        wechat_enabled = get_setting_bool("wechat_enabled", True)
         usdt_enabled = get_setting_bool("usdt_enabled", False)
-        token_enabled = get_setting_bool("alipay_token_enabled", True)
-        alipay_qr_enabled = get_setting_bool("alipay_qr_enabled", True)
-        alipay_qr_ready = bool(get_setting_value("alipay_qr_file_id"))
-        wechat_qr_ready = bool(get_setting_value("wechat_qr_file_id"))
         usdt_address_ready = bool((get_setting_value("usdt_address", "") or '').strip())
 
         checks = [
-            ("支付宝总开关", "✅ 开启" if alipay_enabled else "⚠️ 关闭"),
-            ("支付宝口令收款", "✅ 开启" if token_enabled else "⚠️ 关闭"),
-            ("支付宝收款码收款", "✅ 开启" if alipay_qr_enabled else "⚠️ 关闭"),
-            ("支付宝收款码图片", "✅ 已上传" if alipay_qr_ready else "⚠️ 未上传"),
-            ("微信支付开关", "✅ 开启" if wechat_enabled else "⚠️ 关闭"),
-            ("微信收款码图片", "✅ 已上传" if wechat_qr_ready else "⚠️ 未上传"),
+            ("人工审核路径", "✅ 可用（无需额外配置）"),
             ("USDT 开关", "✅ 开启" if usdt_enabled else "⚠️ 关闭"),
             ("USDT 地址", "✅ 已设置" if usdt_address_ready else "⚠️ 未设置"),
         ]
@@ -1529,16 +1643,10 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             lines.append(f"• {name}：{result}")
 
         suggestions = []
-        if alipay_enabled and not token_enabled and not alipay_qr_enabled:
-            suggestions.append("支付宝已开启，但口令收款和收款码收款都关闭，用户将无法支付。")
-        if alipay_enabled and alipay_qr_enabled and not alipay_qr_ready:
-            suggestions.append("支付宝收款码收款已开启，但未上传支付宝收款码图片。")
-        if wechat_enabled and not wechat_qr_ready:
-            suggestions.append("微信支付已开启，但未上传微信收款码图片。")
         if usdt_enabled and not usdt_address_ready:
             suggestions.append("USDT 已开启，但未设置收款地址。")
-        if not alipay_enabled and not wechat_enabled and not usdt_enabled:
-            suggestions.append("支付宝/微信/USDT 都关闭，客户端会提示管理员未配置收款。")
+        if not usdt_enabled:
+            suggestions.append("USDT 未开启；客户端将仅显示人工审核路径。")
 
         if suggestions:
             lines.extend(["", "🔧 建议修复："])
@@ -1553,16 +1661,9 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup(kb))
         return
 
-    if data in {"set_payimg_alipay", "set_payimg_wechat", "set_payimg_usdt"}:
-        if data.endswith('alipay'):
-            context.user_data['set_payimg'] = 'alipay'
-            back_cb = "admin_pay_alipay_cfg"
-        elif data.endswith('wechat'):
-            context.user_data['set_payimg'] = 'wechat'
-            back_cb = "admin_pay_wechat_cfg"
-        else:
-            context.user_data['set_payimg'] = 'usdt'
-            back_cb = "admin_pay_usdt_cfg"
+    if data == "set_payimg_usdt":
+        context.user_data['set_payimg'] = 'usdt'
+        back_cb = "admin_pay_usdt_cfg"
         await send_or_edit_menu(update, context, "📷 请发送收款二维码图片（可发送照片或图片文件）", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data=back_cb)]]))
         return
 
@@ -1683,13 +1784,30 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     if data.startswith("admin_squad_"):
         squad_uuid = data.replace("admin_squad_", "")
-        nodes = await get_internal_squad_accessible_nodes(squad_uuid)
+        nodes, node_err = await get_internal_squad_accessible_nodes_verbose(squad_uuid)
         lines = ["🧩 **分组详情**", f"UUID: `{squad_uuid}`", "", "可访问节点："]
-        if not nodes:
-            lines.append("- 暂无")
+        if not nodes and node_err:
+            reason_map = {
+                'config_missing': "面板地址或 Token 未配置。",
+                'auth_unauthorized': "面板鉴权失败（401），请检查 Token。",
+                'auth_forbidden': "当前 Token 无权限访问该接口（403）。",
+                'endpoint_or_squad_not_found': "接口或分组不存在（404）。",
+                'network_error': "请求失败，请检查面板连通性。",
+                'empty_payload': "接口返回为空。",
+            }
+            lines.append(f"- ⚠️ 无法加载节点：{reason_map.get(node_err, node_err)}")
+        elif not nodes:
+            lines.append("- 暂无可访问节点")
         else:
             for n in nodes[:20]:
-                lines.append(f"- {n.get('name', '未知节点')}")
+                node_name = (
+                    n.get('name')
+                    or n.get('nodeName')
+                    or n.get('remark')
+                    or n.get('uuid')
+                    or '未知节点'
+                )
+                lines.append(f"- {node_name}")
         kb = [[InlineKeyboardButton("🔙 返回分组", callback_data="admin_squads_menu")]]
         await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup(kb))
         return
@@ -1953,7 +2071,49 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         panel_info = await get_panel_user(target_uuid)
         status = "🟢 面板正常" if panel_info else "🔴 面板已删"
-        msg = (f"👤 **用户详情**\nTG ID: `{dict(sub)['tg_id']}`\n状态: {status}\nUUID: `{target_uuid}`")
+        user_nodes, user_nodes_err = [], None
+        if PANEL_URL and PANEL_TOKEN:
+            resp = await safe_api_request('GET', f"/users/{target_uuid}/accessible-nodes")
+            if not resp:
+                user_nodes_err = "network_error"
+            elif resp.status_code == 401:
+                user_nodes_err = "auth_unauthorized"
+            elif resp.status_code == 403:
+                user_nodes_err = "auth_forbidden"
+            elif resp.status_code == 404:
+                user_nodes_err = "endpoint_or_user_not_found"
+            elif resp.status_code == 200:
+                payload = extract_payload(resp)
+                if isinstance(payload, list):
+                    user_nodes = payload
+                elif isinstance(payload, dict):
+                    nodes = payload.get('accessibleNodes')
+                    if isinstance(nodes, list):
+                        user_nodes = nodes
+                    else:
+                        user_nodes_err = "empty_payload"
+                else:
+                    user_nodes_err = "empty_payload"
+            else:
+                user_nodes_err = f"http_{resp.status_code}"
+        else:
+            user_nodes_err = "config_missing"
+        node_lines = ["可访问节点："]
+        if user_nodes:
+            for n in user_nodes[:10]:
+                node_name = n.get('name') or n.get('nodeName') or n.get('remark') or n.get('uuid') or '未知节点'
+                node_lines.append(f"- {node_name}")
+        else:
+            reason_map = {
+                "config_missing": "面板地址或 Token 未配置",
+                "network_error": "面板网络不可达",
+                "auth_unauthorized": "Token 鉴权失败(401)",
+                "auth_forbidden": "Token 权限不足(403)",
+                "endpoint_or_user_not_found": "接口或用户不存在(404)",
+                "empty_payload": "接口返回为空",
+            }
+            node_lines.append(f"- ⚠️ {reason_map.get(user_nodes_err, user_nodes_err or '暂无')}")
+        msg = (f"👤 **用户详情**\nTG ID: `{dict(sub)['tg_id']}`\n状态: {status}\nUUID: `{target_uuid}`\n\n" + "\n".join(node_lines))
         keyboard = [
             [InlineKeyboardButton("🔄 重置流量", callback_data=f"reset_traffic_{target_uuid}")],
             [InlineKeyboardButton("📜 最近请求记录", callback_data=f"user_reqhist_{target_uuid}")],
@@ -2056,9 +2216,17 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         key = f"p{int(time.time())}"
         db_execute("INSERT INTO plans (key, name, price, usdt_price, days, gb, reset_strategy) VALUES (?, ?, ?, ?, ?, ?, ?)", (key, new_plan['name'], new_plan['price'], new_plan['usdt_price'], new_plan['days'], new_plan['gb'], strategy))
         del context.user_data['add_plan_step']
-        await send_or_edit_menu(update, context, f"✅ **套餐添加成功！**\n{new_plan['name']} - {strategy}", None)
-        await asyncio.sleep(1)
-        await show_plans_menu(update, context)
+        strategy_label = get_strategy_label(strategy)
+        msg = (
+            "✅ 套餐添加成功！\n"
+            f"套餐名称：{new_plan['name']}\n"
+            f"重置策略：{strategy_label} ({strategy})"
+        )
+        kb = [
+            [InlineKeyboardButton("📦 返回套餐管理", callback_data="admin_plans_list")],
+            [InlineKeyboardButton("🏠 返回主菜单", callback_data="back_home")],
+        ]
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb), parse_mode=None)
 
 async def show_users_list(update, context):
     users = db_query("SELECT DISTINCT tg_id, MAX(created_at) as created_at FROM subscriptions GROUP BY tg_id ORDER BY created_at DESC LIMIT 20")
@@ -2090,13 +2258,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not file_id:
             await update.message.reply_text("❌ 请发送图片文件", reply_markup=cancel_kb)
             return
-        key_map = {'alipay': 'alipay_qr_file_id', 'wechat': 'wechat_qr_file_id', 'usdt': 'usdt_qr_file_id'}
-        key = key_map.get(pay_type, 'wechat_qr_file_id')
+        key_map = {'usdt': 'usdt_qr_file_id'}
+        key = key_map.get(pay_type, 'usdt_qr_file_id')
         set_setting_value(key, file_id)
         context.user_data.pop('set_payimg', None)
-        label_map = {'alipay': '支付宝', 'wechat': '微信支付', 'usdt': 'USDT'}
-        back_map = {'alipay': 'admin_pay_alipay_cfg', 'wechat': 'admin_pay_wechat_cfg', 'usdt': 'admin_pay_usdt_cfg'}
-        label = label_map.get(pay_type, '收款')
+        label_map = {'usdt': 'USDT'}
+        back_map = {'usdt': 'admin_pay_usdt_cfg'}
+        label = label_map.get(pay_type, 'USDT')
         await update.message.reply_text(f"✅ 已更新{label}收款码。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data=back_map.get(pay_type, 'admin_pay_settings'))]]))
         return
 
@@ -2110,6 +2278,60 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_setting_value('usdt_address', text.strip())
         context.user_data.pop('paycfg_input_usdt_address', None)
         await update.message.reply_text("✅ USDT 地址已更新。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_pay_usdt_cfg")]]))
+        return
+
+    if user_id == ADMIN_ID and context.user_data.get('panel_user_lookup_mode') and text:
+        raw = text.strip()
+        lookup_type = "auto"
+        lookup_value = raw
+        if ":" in raw:
+            lookup_type, lookup_value = [x.strip() for x in raw.split(":", 1)]
+            lookup_type = lookup_type.lower()
+        panel_user = None
+        if lookup_type in {"tg", "telegram", "telegram_id", "auto"} and lookup_value.isdigit():
+            panel_user = await get_user_by_telegram_id(int(lookup_value))
+            lookup_type = "telegramId"
+        elif lookup_type in {"username", "user"}:
+            panel_user = await get_user_by_username(lookup_value)
+            lookup_type = "username"
+        elif lookup_type in {"uuid"}:
+            panel_user = await get_panel_user(lookup_value)
+            lookup_type = "uuid"
+        elif lookup_type in {"short", "short_uuid"}:
+            panel_user = await get_user_by_short_uuid(lookup_value)
+            lookup_type = "shortUuid"
+        elif lookup_value.isdigit():
+            panel_user = await get_user_by_telegram_id(int(lookup_value))
+            lookup_type = "telegramId"
+        else:
+            panel_user = await get_user_by_username(lookup_value)
+            lookup_type = "username"
+
+        if not isinstance(panel_user, dict):
+            await update.message.reply_text(
+                "❌ 未找到面板用户，或当前 Token 无权限访问该检索接口。",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔎 继续检索", callback_data="admin_panel_user_lookup")], [InlineKeyboardButton("🏠 返回主页", callback_data="back_home")]]),
+            )
+            return
+
+        puuid = panel_user.get('uuid') or '-'
+        puser = panel_user.get('username') or '-'
+        ptg = panel_user.get('telegramId')
+        pstatus = panel_user.get('status') or '-'
+        pstrategy = panel_user.get('trafficLimitStrategy') or '-'
+        lines = [
+            "✅ 检索到面板用户",
+            f"检索方式: {lookup_type}",
+            f"UUID: {puuid}",
+            f"用户名: {puser}",
+            f"Telegram ID: {ptg if ptg is not None else '-'}",
+            f"状态: {pstatus}",
+            f"重置策略: {pstrategy}",
+        ]
+        kb = [[InlineKeyboardButton("🔎 继续检索", callback_data="admin_panel_user_lookup")], [InlineKeyboardButton("🏠 返回主页", callback_data="back_home")]]
+        if puuid != '-' and isinstance(ptg, int):
+            kb.insert(0, [InlineKeyboardButton("🔗 绑定到本地订阅", callback_data=f"bind_panel_user_{ptg}_{puuid}")])
+        await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
         return
 
     if user_id == ADMIN_ID and context.user_data.get('broadcast_mode'):
@@ -2130,21 +2352,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id == ADMIN_ID and context.user_data.get('panelcfg_input_url') and text:
         save_runtime_config(panel_url=text.strip())
         context.user_data.pop('panelcfg_input_url', None)
+        await cleanup_panelcfg_prompt_message(context, user_id)
         await update.message.reply_text("✅ 面板地址已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
         return
     if user_id == ADMIN_ID and context.user_data.get('panelcfg_input_token') and text:
         save_runtime_config(panel_token=text.strip())
         context.user_data.pop('panelcfg_input_token', None)
+        await cleanup_panelcfg_prompt_message(context, user_id)
         await update.message.reply_text("✅ 面板 Token 已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
         return
     if user_id == ADMIN_ID and context.user_data.get('panelcfg_input_subdomain') and text:
         save_runtime_config(sub_domain=text.strip())
         context.user_data.pop('panelcfg_input_subdomain', None)
+        await cleanup_panelcfg_prompt_message(context, user_id)
         await update.message.reply_text("✅ 订阅域名已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
         return
     if user_id == ADMIN_ID and context.user_data.get('panelcfg_input_group') and text:
         save_runtime_config(group_uuid=text.strip())
         context.user_data.pop('panelcfg_input_group', None)
+        await cleanup_panelcfg_prompt_message(context, user_id)
         await update.message.reply_text("✅ 默认组 UUID 已更新", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_config")]]))
         return
     if user_id == ADMIN_ID and context.user_data.get('edit_subscription_settings') and text:
@@ -2215,20 +2441,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         back_cb = context.user_data.get('reply_back_cb', 'back_home')
         try:
             await context.bot.copy_message(chat_id=target_uid, from_chat_id=user_id, message_id=update.message.message_id)
-            await context.bot.send_message(target_uid, "👆 **(来自客服的回复)**", parse_mode='Markdown')
-            admin_done_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回上一页", callback_data=back_cb)]])
-            await update.message.reply_text("✅ 回复已送达！", reply_markup=admin_done_kb)
+            set_support_reply_session(context, target_uid, source='admin_direct_reply', admin_id=user_id)
+            logger.info("admin message delivered and support context activated: admin=%s target_user=%s", user_id, target_uid)
+            await upsert_support_control_message(
+                context,
+                target_uid,
+                "👆 **来自客服/管理员的回复**\n你现在处于客服会话模式，下一条消息将直接发送给客服。",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✉️ 继续回复客服", callback_data="contact_support")],
+                    [InlineKeyboardButton("🚪 结束会话", callback_data="back_home")],
+                ]),
+            )
+            await cleanup_admin_reply_prompt(context, user_id, context.user_data, reason='send_success')
+            await update.message.reply_text("✅ 回复已送达，已进入会话状态。")
         except Exception as e:
             await update.message.reply_text(f"❌ 发送失败：{e}")
+            admin_done_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回上一页", callback_data=back_cb)]])
+            await update.message.reply_text("你可以重试，或返回上一页。", reply_markup=admin_done_kb)
         del context.user_data['reply_to_uid']
         context.user_data.pop('reply_back_cb', None)
         return
-    if context.user_data.get('chat_mode') == 'support':
-        admin_header = f"📨 **新客服消息**\n来自：{update.effective_user.mention_html()} (`{user_id}`)"
+    support_ctx = get_support_reply_session(context, user_id)
+    if not support_ctx and context.user_data.get('chat_mode') == 'support':
+        fallback_ctx = context.user_data.get('support_reply_context') or {}
+        source = fallback_ctx.get('source', 'user_initiated')
+        set_support_reply_session(context, user_id, source=source)
+        support_ctx = get_support_reply_session(context, user_id)
+    support_mode_active = bool(support_ctx)
+    if support_mode_active:
+        source = support_ctx.get('source', 'user_initiated')
+        context.user_data['chat_mode'] = 'support'
+        context.user_data['support_reply_context'] = {'source': source, 'updated_at': int(time.time())}
+        set_support_reply_session(context, user_id, source=source, admin_id=support_ctx.get('admin_id'))
+        logger.info("user message routed to support first: user=%s source=%s", user_id, source)
+        admin_header = f"📨 <b>新客服消息</b>\n来自：{update.effective_user.mention_html()} ({user_id})\n会话来源：{source}"
         reply_kb = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ 回复此用户", callback_data=f"reply_user_{user_id}_back_home")]])
         await context.bot.send_message(ADMIN_ID, admin_header, reply_markup=reply_kb, parse_mode='HTML')
         await context.bot.copy_message(chat_id=ADMIN_ID, from_chat_id=user_id, message_id=update.message.message_id)
-        await update.message.reply_text("✅ 已转发")
+        await upsert_support_control_message(
+            context,
+            user_id,
+            "✅ 已转发给客服。你可继续发送消息，或点击下方结束会话。",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🚪 结束会话", callback_data="back_home")]]),
+        )
         return
     if user_id == ADMIN_ID and context.user_data.get('setting_notify') and text:
         if text.isdigit():
@@ -2349,26 +2604,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == 'gb':
             if not text.isdigit(): return await update.message.reply_text("❌ 请输入数字", reply_markup=cancel_kb)
             context.user_data['new_plan']['gb'] = int(text)
-            keyboard = [[InlineKeyboardButton("🚫 永不重置", callback_data="set_strategy_NO_RESET")], [InlineKeyboardButton("📅 每日重置", callback_data="set_strategy_DAY")], [InlineKeyboardButton("🗓 每周重置", callback_data="set_strategy_WEEK")], [InlineKeyboardButton("🌝 每月重置", callback_data="set_strategy_MONTH")], [InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]]
+            keyboard = [[InlineKeyboardButton("🚫 永不重置", callback_data="set_strategy_NO_RESET")], [InlineKeyboardButton("📅 每日重置", callback_data="set_strategy_DAY")], [InlineKeyboardButton("🗓 每周重置", callback_data="set_strategy_WEEK")], [InlineKeyboardButton("🌝 每月重置", callback_data="set_strategy_MONTH")], [InlineKeyboardButton("🌙 按开通日每月重置", callback_data="set_strategy_MONTH_ROLLING")], [InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]]
             await update.message.reply_text("🔄 **步骤 6/6：请选择流量重置策略**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         return
-    if user_id in temp_orders and text:
-        order = temp_orders[user_id]
-        plan = db_query("SELECT * FROM plans WHERE key = ?", (order['plan'],), one=True)
-        t_str = "续费" if order['type'] == 'renew' else "新购"
-        admin_msg = f"💰 **审核 {t_str}**\n👤 {update.effective_user.mention_html()} (`{user_id}`)\n📦 {dict(plan)['name']}\n📝 口令：<code>{text}</code>"
-        safe_uuid = order['target_uuid'] if order['target_uuid'] else "0"
-        sid = get_short_id(safe_uuid) if safe_uuid != "0" else "0"
-        kb = [[InlineKeyboardButton("✅ 通过", callback_data=f"ap_{user_id}_{order['plan']}_{order['type']}_{sid}")], [InlineKeyboardButton("❌ 拒绝", callback_data=f"rj_{user_id}_{order['plan']}_{order['type']}_{sid}")]]
-        await context.bot.send_message(ADMIN_ID, admin_msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        msg_obj = await update.message.reply_text("✅ 已提交，等待管理员确认。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]))
-        temp_orders[user_id]['waiting_msg_id'] = msg_obj.message_id
-        if 'menu_msg_id' in temp_orders[user_id]:
-            try:
-                await context.bot.delete_message(chat_id=user_id, message_id=temp_orders[user_id]['menu_msg_id'])
-            except:
-                pass
-            temp_orders[user_id].pop('menu_msg_id', None)
+    pending_order = get_pending_order_for_user(db_query, user_id)
+    if pending_order:
+        logger.info("user message routed to pending-order proof: user=%s order=%s", user_id, pending_order.get('order_id'))
+        awaiting_order_id = context.user_data.get('awaiting_manual_review_proof_order_id')
+        if awaiting_order_id and awaiting_order_id != pending_order['order_id']:
+            logger.warning("awaiting order mismatch: user=%s expected=%s actual=%s", user_id, awaiting_order_id, pending_order['order_id'])
+        proof = None
+        if text and text.strip():
+            proof = {'type': 'text', 'text': text.strip()}
+        elif update.message.photo:
+            proof = {'type': 'photo', 'file_id': update.message.photo[-1].file_id, 'text': (update.message.caption or '').strip()}
+        elif update.message.document:
+            proof = {'type': 'document', 'file_id': update.message.document.file_id, 'text': (update.message.caption or '').strip()}
+
+        if not proof:
+            await update.message.reply_text(
+                "⚠️ 检测到你有待支付订单，请发送文字口令、支付截图或支付文件。",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")]]),
+            )
+            return
+
+        proof['order_id'] = pending_order['order_id']
+        context.user_data['pending_payment_proof'] = proof
+        await submit_manual_review_proof(update, context, pending_order, proof)
+        return
 
 async def add_plan_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2382,15 +2645,24 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     client_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
     admin_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
-    async def clean_user_waiting_msg(uid):
-        if uid in temp_orders:
-            if 'waiting_msg_id' in temp_orders[uid]:
-                try: await context.bot.delete_message(chat_id=uid, message_id=temp_orders[uid]['waiting_msg_id'])
-                except: pass
-            if 'menu_msg_id' in temp_orders[uid]:
-                try: await context.bot.delete_message(chat_id=uid, message_id=temp_orders[uid]['menu_msg_id'])
-                except: pass
-            del temp_orders[uid]
+    async def clean_user_waiting_msg(order_record):
+        uid = int(order_record.get('tg_id', 0) or 0)
+        waiting_message_id = order_record.get('waiting_message_id')
+        menu_message_id = order_record.get('menu_message_id')
+        if waiting_message_id:
+            try:
+                await context.bot.delete_message(chat_id=uid, message_id=waiting_message_id)
+            except Exception as exc:
+                logger.debug("failed to delete waiting message for uid=%s order=%s: %s", uid, order_record.get('order_id'), exc)
+        if menu_message_id:
+            try:
+                await context.bot.delete_message(chat_id=uid, message_id=menu_message_id)
+            except Exception as exc:
+                logger.debug("failed to delete menu message for uid=%s order=%s: %s", uid, order_record.get('order_id'), exc)
+        db_execute(
+            "UPDATE orders SET waiting_message_id=NULL, menu_message_id=NULL, updated_at=? WHERE order_id=?",
+            (int(time.time()), order_record.get('order_id')),
+        )
     if data.startswith("review_"):
         parts = data.split("_")
         if len(parts) >= 5:
@@ -2408,17 +2680,26 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith("rj_"):
         parts = data.split("_")
-        uid = int(parts[1])
+        order_id = parts[1]
+        order = get_order(db_query, order_id)
+        if not order:
+            await query.edit_message_text("⚠️ 订单不存在", reply_markup=admin_return_btn)
+            return
+        uid = int(order['tg_id'])
         retry_markup = admin_return_btn
         if len(parts) >= 5:
             retry_markup = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🧾 再次审核", callback_data=f"review_{parts[1]}_{parts[2]}_{parts[3]}_{parts[4]}")],
                 [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]
             ])
+        update_order_status(db_execute, order_id, [STATUS_PENDING, STATUS_APPROVED], STATUS_REJECTED, error_message='rejected_by_admin')
+        append_order_audit_log(db_execute, order_id, 'reject', query.from_user.id, 'admin_rejected')
         await query.edit_message_text("❌ 已拒绝", reply_markup=retry_markup)
-        await clean_user_waiting_msg(uid)
-        try: await context.bot.send_message(uid, "❌ 您的订单已被管理员拒绝。", reply_markup=client_return_btn)
-        except: pass
+        await clean_user_waiting_msg(order)
+        try:
+            await context.bot.send_message(uid, "❌ 您的订单已被管理员拒绝。", reply_markup=client_return_btn)
+        except Exception as exc:
+            logger.warning("failed to send reject notice uid=%s order=%s: %s", uid, order_id, exc)
         return
 
     if data.startswith("rt_"):
@@ -2507,6 +2788,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "trafficLimitBytes": new_limit,
                 "expireAt": expire_iso,
                 "status": USER_STATUS_ACTIVE,
+                "telegramId": int(uid),
                 "activeInternalSquads": [TARGET_GROUP_UUID],
                 "trafficLimitStrategy": reset_strategy,
             }
@@ -2541,6 +2823,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             payload = {
                 "username": f"tg_{uid}_{int(time.time())}",
                 "status": USER_STATUS_ACTIVE,
+                "telegramId": int(uid),
                 "trafficLimitBytes": add_traffic,
                 "trafficLimitStrategy": reset_strategy,
                 "expireAt": expire_iso,
@@ -2839,10 +3122,13 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^anomaly_whitelist_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^anomaly_quick_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^bulk_"))
+    app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^bind_panel_user_"))
+    app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^tpl_"))
     app.add_handler(CallbackQueryHandler(add_plan_start, pattern="^add_plan_start$"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^client_"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^selrenew_"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^order_"))
+    app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^manualreview_"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^paymethod_"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^cancel_order"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^back_home$"))
@@ -2851,6 +3137,7 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^view_sub_"))
     app.add_handler(CallbackQueryHandler(process_order, pattern="^(ap|rj|review)_"))
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
+    app.add_error_handler(telegram_error_handler)
     
     app.job_queue.run_daily(check_expiry_job, time=datetime.time(hour=12, minute=0, second=0))
     app.job_queue.run_repeating(check_anomalies_job, interval=3600, first=60, name='check_anomalies_job')
