@@ -422,6 +422,32 @@ async def get_internal_squads():
 async def get_internal_squad_accessible_nodes(uuid):
     return await api_get_internal_squad_accessible_nodes(uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
+async def get_internal_squad_accessible_nodes_verbose(uuid):
+    if not PANEL_URL or not PANEL_TOKEN:
+        return [], 'config_missing'
+    resp = await safe_api_request('GET', f'/internal-squads/{uuid}/accessible-nodes')
+    if not resp:
+        return [], 'network_error'
+    if resp.status_code == 401:
+        return [], 'auth_unauthorized'
+    if resp.status_code == 403:
+        return [], 'auth_forbidden'
+    if resp.status_code == 404:
+        return [], 'endpoint_or_squad_not_found'
+    if resp.status_code != 200:
+        return [], f"http_{resp.status_code}"
+    payload = extract_payload(resp)
+    if isinstance(payload, list):
+        return payload, None
+    if isinstance(payload, dict):
+        nodes = payload.get('accessibleNodes')
+        if isinstance(nodes, list):
+            return nodes, None
+        nodes = payload.get('nodes')
+        if isinstance(nodes, list):
+            return nodes, None
+    return [], 'empty_payload'
+
 
 async def get_bandwidth_nodes_realtime():
     return await api_get_bandwidth_nodes_realtime(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
@@ -752,6 +778,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data == "contact_support":
         context.user_data['chat_mode'] = 'support'
+        context.user_data['support_reply_context'] = {'source': 'user_initiated', 'updated_at': int(time.time())}
         msg = dynamic_snippets_cache.get("support_contact_tip") or "📞 **客服模式已开启**\n请直接发送文字、图片或文件。\n🚪 结束咨询请点击下方按钮。"
         keyboard = [[InlineKeyboardButton("🚪 结束咨询", callback_data="back_home")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
@@ -1349,7 +1376,12 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return
             payload = json.loads(dict(row).get('payload_json') or '{}')
             apply_template_payload(payload, actor=query.from_user.id)
-            await query.answer("✅ 已应用自定义模板", show_alert=True)
+            await send_or_edit_menu(
+                update,
+                context,
+                f"✅ 已应用自定义模板：{dict(row).get('name', f'#{sid}')}\n相关参数已写入设置。",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回模板中心", callback_data="admin_template_center")], [InlineKeyboardButton("🏠 返回主页", callback_data="back_home")]]),
+            )
             return
         builtins = get_builtin_templates()
         tpl = builtins.get(key)
@@ -1357,7 +1389,12 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.answer("模板不存在", show_alert=True)
             return
         apply_template_payload(tpl, actor=query.from_user.id)
-        await query.answer("✅ 模板已应用", show_alert=True)
+        await send_or_edit_menu(
+            update,
+            context,
+            f"✅ 已应用模板：{tpl.get('name', key)}\n相关参数已写入设置。",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回模板中心", callback_data="admin_template_center")], [InlineKeyboardButton("🏠 返回主页", callback_data="back_home")]]),
+        )
         return
     if data == "admin_bulk_jobs":
         rows = db_query("SELECT * FROM bulk_jobs ORDER BY created_at DESC LIMIT 20")
@@ -1609,13 +1646,30 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     if data.startswith("admin_squad_"):
         squad_uuid = data.replace("admin_squad_", "")
-        nodes = await get_internal_squad_accessible_nodes(squad_uuid)
+        nodes, node_err = await get_internal_squad_accessible_nodes_verbose(squad_uuid)
         lines = ["🧩 **分组详情**", f"UUID: `{squad_uuid}`", "", "可访问节点："]
-        if not nodes:
-            lines.append("- 暂无")
+        if not nodes and node_err:
+            reason_map = {
+                'config_missing': "面板地址或 Token 未配置。",
+                'auth_unauthorized': "面板鉴权失败（401），请检查 Token。",
+                'auth_forbidden': "当前 Token 无权限访问该接口（403）。",
+                'endpoint_or_squad_not_found': "接口或分组不存在（404）。",
+                'network_error': "请求失败，请检查面板连通性。",
+                'empty_payload': "接口返回为空。",
+            }
+            lines.append(f"- ⚠️ 无法加载节点：{reason_map.get(node_err, node_err)}")
+        elif not nodes:
+            lines.append("- 暂无可访问节点")
         else:
             for n in nodes[:20]:
-                lines.append(f"- {n.get('name', '未知节点')}")
+                node_name = (
+                    n.get('name')
+                    or n.get('nodeName')
+                    or n.get('remark')
+                    or n.get('uuid')
+                    or '未知节点'
+                )
+                lines.append(f"- {node_name}")
         kb = [[InlineKeyboardButton("🔙 返回分组", callback_data="admin_squads_menu")]]
         await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup(kb))
         return
@@ -2153,7 +2207,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         back_cb = context.user_data.get('reply_back_cb', 'back_home')
         try:
             await context.bot.copy_message(chat_id=target_uid, from_chat_id=user_id, message_id=update.message.message_id)
-            await context.bot.send_message(target_uid, "👆 **(来自客服的回复)**", parse_mode='Markdown')
+            target_user_state = context.application.user_data.setdefault(target_uid, {})
+            target_user_state['chat_mode'] = 'support'
+            target_user_state['support_reply_context'] = {
+                'source': 'admin_direct_reply',
+                'updated_at': int(time.time()),
+            }
+            await context.bot.send_message(
+                target_uid,
+                "👆 **来自客服/管理员的回复**\n你现在处于客服会话模式，下一条消息将直接发送给客服。",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✉️ 继续回复客服", callback_data="contact_support")],
+                    [InlineKeyboardButton("🚪 结束会话", callback_data="back_home")],
+                ]),
+            )
             admin_done_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回上一页", callback_data=back_cb)]])
             await update.message.reply_text("✅ 回复已送达！", reply_markup=admin_done_kb)
         except Exception as e:
@@ -2162,11 +2230,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('reply_back_cb', None)
         return
     if context.user_data.get('chat_mode') == 'support':
-        admin_header = f"📨 **新客服消息**\n来自：{update.effective_user.mention_html()} (`{user_id}`)"
+        support_ctx = context.user_data.get('support_reply_context') or {}
+        source = support_ctx.get('source', 'user_initiated')
+        admin_header = f"📨 <b>新客服消息</b>\n来自：{update.effective_user.mention_html()} ({user_id})\n会话来源：{source}"
         reply_kb = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ 回复此用户", callback_data=f"reply_user_{user_id}_back_home")]])
         await context.bot.send_message(ADMIN_ID, admin_header, reply_markup=reply_kb, parse_mode='HTML')
         await context.bot.copy_message(chat_id=ADMIN_ID, from_chat_id=user_id, message_id=update.message.message_id)
-        await update.message.reply_text("✅ 已转发")
+        await update.message.reply_text("✅ 已转发给客服。你可继续发送消息，或点击下方结束会话。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚪 结束会话", callback_data="back_home")]]))
         return
     if user_id == ADMIN_ID and context.user_data.get('setting_notify') and text:
         if text.isdigit():
