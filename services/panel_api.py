@@ -242,17 +242,7 @@ async def probe_api_capabilities(panel_url, headers, verify_tls=True):
         "users_bulk_update": ('POST', '/users/bulk/update', {"uuids": [], "fields": {}}),
         "users_bulk_delete": ('POST', '/users/bulk/delete', {"uuids": []}),
         "subscription_history": ('GET', '/subscription-request-history', None),
-        "ip_control_drop_connections": (
-            'POST',
-            '/ip-control/drop-connections',
-            {
-                "dropBy": {"by": "ipAddresses", "ipAddresses": ["127.0.0.1"]},
-                "targetNodes": {"target": "allNodes"},
-            },
-        ),
-        "ip_control_fetch_ips": ('POST', '/ip-control/fetch-ips/00000000-0000-0000-0000-000000000000', None),
-        "ip_control_fetch_ips_result": ('GET', '/ip-control/fetch-ips/result/00000000-0000-0000-0000-000000000000', None),
-        "metadata": ('GET', '/metadata', None),
+        "ip_control": ('GET', '/ip-control', None),
         "system_health": ('GET', '/system/health', None),
         "snippets": ('GET', '/snippets', None),
         "subscription_page_configs": ('GET', '/subscription-page-configs', None),

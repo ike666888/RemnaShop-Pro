@@ -75,6 +75,7 @@ COOLDOWN_SECONDS = 1.0
 uuid_map = {}
 order_payment_method_cache = {}
 panel_capabilities_cache = {}
+panel_capabilities_runtime_success = {}
 dynamic_snippets_cache = {}
 
 def get_short_id(real_uuid):
@@ -167,6 +168,20 @@ def set_setting_value(key, value):
 def get_setting_bool(key, default=True):
     raw = str(get_setting_value(key, "1" if default else "0")).strip().lower()
     return raw in {"1", "true", "yes", "on", "开启", "开"}
+
+
+def mark_panel_capability_success(name: str):
+    panel_capabilities_runtime_success[str(name)] = True
+
+
+def capability_enabled(name: str, default=False):
+    key = str(name)
+    if panel_capabilities_runtime_success.get(key):
+        return True
+    explicit = get_setting_value(f"panel_capability_{key}", "")
+    if explicit != "":
+        return str(explicit).strip().lower() in {"1", "true", "yes", "on", "开启", "开"}
+    return bool(panel_capabilities_cache.get(key, default))
 
 def get_plan_price(plan_dict, payment_method='alipay'):
     if payment_method == 'usdt':
@@ -453,11 +468,17 @@ async def bulk_update_panel_users(uuids, fields):
 
 
 async def set_panel_user_metadata(user_uuid, metadata):
-    return await api_set_user_metadata(user_uuid, metadata, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+    resp = await api_set_user_metadata(user_uuid, metadata, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+    if resp and resp.status_code < 400:
+        mark_panel_capability_success("metadata")
+    return resp
 
 
 async def block_panel_ip(ip, reason):
-    return await api_block_ip_address(ip, reason, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+    resp = await api_block_ip_address(ip, reason, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+    if resp and resp.status_code < 400:
+        mark_panel_capability_success("ip_control")
+    return resp
 
 
 async def get_panel_system_health():
@@ -483,7 +504,11 @@ async def get_panel_config_profiles():
 async def refresh_panel_capabilities():
     global panel_capabilities_cache
     panel_capabilities_cache = await api_probe_api_capabilities(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
-    logger.info("Panel capabilities: %s", panel_capabilities_cache)
+    logger.info(
+        "Panel capabilities static=%s runtime_success=%s",
+        panel_capabilities_cache,
+        panel_capabilities_runtime_success,
+    )
     return panel_capabilities_cache
 
 
@@ -2708,7 +2733,7 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
             unfreeze_candidates = {}
         high_risk_disable_uuids = []
         mid_risk_limited_uuids = []
-        ip_control_enabled = bool(panel_capabilities_cache.get("ip_control_drop_connections", False))
+        ip_control_enabled = capability_enabled("ip_control", default=False)
 
         for item in incidents:
             uid = item['uid']
