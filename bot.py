@@ -2706,7 +2706,7 @@ async def check_anomalies_job(context: ContextTypes.DEFAULT_TYPE):
             unfreeze_candidates = {}
         high_risk_disable_uuids = []
         mid_risk_limited_uuids = []
-        ip_control_enabled = bool(panel_capabilities_cache.get("ip_control", False))
+        ip_control_enabled = bool(panel_capabilities_cache.get("ip_control_drop_connections", False))
 
         for item in incidents:
             uid = item['uid']

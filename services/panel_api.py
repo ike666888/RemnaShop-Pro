@@ -9,6 +9,12 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 _CLIENTS: dict[bool, httpx.AsyncClient] = {}
 
+IP_CONTROL_ENDPOINT_SPECS: tuple[tuple[str, str], ...] = (
+    ('POST', '/ip-control/drop-connections'),
+    ('POST', '/ip-control/fetch-ips/{uuid}'),
+    ('GET', '/ip-control/fetch-ips/result/{jobId}'),
+)
+
 
 def _get_client(verify_tls: bool) -> httpx.AsyncClient:
     client = _CLIENTS.get(verify_tls)
@@ -236,7 +242,16 @@ async def probe_api_capabilities(panel_url, headers, verify_tls=True):
         "users_bulk_update": ('POST', '/users/bulk/update', {"uuids": [], "fields": {}}),
         "users_bulk_delete": ('POST', '/users/bulk/delete', {"uuids": []}),
         "subscription_history": ('GET', '/subscription-request-history', None),
-        "ip_control": ('GET', '/ip-control', None),
+        "ip_control_drop_connections": (
+            'POST',
+            '/ip-control/drop-connections',
+            {
+                "dropBy": {"by": "ipAddresses", "ipAddresses": ["127.0.0.1"]},
+                "targetNodes": {"target": "allNodes"},
+            },
+        ),
+        "ip_control_fetch_ips": ('POST', '/ip-control/fetch-ips/00000000-0000-0000-0000-000000000000', None),
+        "ip_control_fetch_ips_result": ('GET', '/ip-control/fetch-ips/result/00000000-0000-0000-0000-000000000000', None),
         "metadata": ('GET', '/metadata', None),
         "system_health": ('GET', '/system/health', None),
         "snippets": ('GET', '/snippets', None),
@@ -248,6 +263,11 @@ async def probe_api_capabilities(panel_url, headers, verify_tls=True):
     for key, (method, endpoint, payload) in checks.items():
         resp = await safe_api_request(method, endpoint, panel_url, headers, verify_tls, json_data=payload)
         result[key] = bool(resp and resp.status_code not in (404, 405))
+    result["ip_control"] = bool(
+        result.get("ip_control_drop_connections")
+        or result.get("ip_control_fetch_ips")
+        or result.get("ip_control_fetch_ips_result")
+    )
     return result
 
 
@@ -270,13 +290,15 @@ async def set_user_metadata(user_uuid, metadata: dict[str, Any], panel_url, head
 
 
 async def block_ip_address(ip: str, reason: str, panel_url, headers, verify_tls=True):
-    payload = {"ip": ip, "reason": reason}
-    candidates = [
-        ('POST', '/ip-control/blocked-ips'),
-        ('POST', '/ip-control/block'),
-        ('POST', '/ip-control/blacklist'),
-    ]
-    return await _request_first_success(candidates, panel_url, headers, verify_tls, json_data=payload)
+    payload = {
+        "dropBy": {"by": "ipAddresses", "ipAddresses": [ip]},
+        "targetNodes": {"target": "allNodes"},
+    }
+    resp = await safe_api_request('POST', '/ip-control/drop-connections', panel_url, headers, verify_tls, json_data=payload)
+    if resp and resp.status_code < 400:
+        logger.info("Dropped connections for ip=%s (reason=%s)", ip, reason)
+        return resp
+    return None
 
 
 async def get_system_health(panel_url, headers, verify_tls=True):
