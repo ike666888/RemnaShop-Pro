@@ -7,7 +7,7 @@ import asyncio
 import qrcode
 from io import BytesIO
 from collections import defaultdict
-from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_user_by_telegram_id as api_get_user_by_telegram_id, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_realtime as api_get_bandwidth_nodes_realtime, bulk_move_users_to_squad as api_bulk_move_users_to_squad, create_user as api_create_user, patch_user as api_patch_user, delete_user as api_delete_user, enable_user as api_enable_user, disable_user as api_disable_user, reset_user_traffic as api_reset_user_traffic, get_subscription_request_history as api_get_subscription_request_history, bulk_delete_users as api_bulk_delete_users, bulk_update_users as api_bulk_update_users, probe_api_capabilities as api_probe_api_capabilities, set_user_metadata as api_set_user_metadata, block_ip_address as api_block_ip_address, get_system_health as api_get_system_health, get_snippet_by_key as api_get_snippet_by_key, get_subscription_page_configs as api_get_subscription_page_configs, get_external_squads as api_get_external_squads, get_config_profiles as api_get_config_profiles, close_all_clients, extract_payload
+from services.panel_api import safe_api_request as api_safe_request, get_panel_user as api_get_panel_user, get_user_by_telegram_id as api_get_user_by_telegram_id, get_user_by_username as api_get_user_by_username, get_user_by_short_uuid as api_get_user_by_short_uuid, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_realtime as api_get_bandwidth_nodes_realtime, bulk_move_users_to_squad as api_bulk_move_users_to_squad, create_user as api_create_user, patch_user as api_patch_user, delete_user as api_delete_user, enable_user as api_enable_user, disable_user as api_disable_user, reset_user_traffic as api_reset_user_traffic, get_subscription_request_history as api_get_subscription_request_history, bulk_delete_users as api_bulk_delete_users, bulk_update_users as api_bulk_update_users, probe_api_capabilities as api_probe_api_capabilities, set_user_metadata as api_set_user_metadata, block_ip_address as api_block_ip_address, get_system_health as api_get_system_health, get_system_stats as api_get_system_stats, get_system_stats_recap as api_get_system_stats_recap, get_snippet_by_key as api_get_snippet_by_key, get_subscription_page_configs as api_get_subscription_page_configs, get_external_squads as api_get_external_squads, get_config_profiles as api_get_config_profiles, get_user_accessible_nodes as api_get_user_accessible_nodes, close_all_clients, extract_payload
 from services.orders import (
     create_order,
     get_order,
@@ -396,6 +396,14 @@ async def get_user_by_telegram_id(telegram_id):
     return await api_get_user_by_telegram_id(telegram_id, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
 
+async def get_user_by_username(username):
+    return await api_get_user_by_username(username, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_user_by_short_uuid(short_uuid):
+    return await api_get_user_by_short_uuid(short_uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
 async def get_nodes_status():
     return await api_get_nodes_status(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
@@ -511,6 +519,14 @@ async def get_panel_system_health():
     return await api_get_system_health(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
 
+async def get_panel_system_stats():
+    return await api_get_system_stats(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_panel_system_stats_recap():
+    return await api_get_system_stats_recap(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
 async def get_panel_snippet(key):
     return await api_get_snippet_by_key(key, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
@@ -525,6 +541,10 @@ async def get_panel_external_squads():
 
 async def get_panel_config_profiles():
     return await api_get_config_profiles(PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
+
+
+async def get_user_accessible_nodes(uuid):
+    return await api_get_user_accessible_nodes(uuid, PANEL_URL, get_headers(), PANEL_VERIFY_TLS)
 
 
 async def refresh_panel_capabilities():
@@ -729,7 +749,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📈 带宽看板", callback_data="admin_bandwidth_dashboard"), InlineKeyboardButton("🛡️ 风控策略", callback_data="admin_risk_policy")],
             [InlineKeyboardButton("🕒 操作时间线", callback_data="admin_ops_timeline"), InlineKeyboardButton("📢 群发通知", callback_data="admin_broadcast_start")],
             [InlineKeyboardButton("💳 收款设置", callback_data="admin_pay_settings"), InlineKeyboardButton("🔌 面板配置", callback_data="admin_panel_config")],
-            [InlineKeyboardButton("🧩 模板中心", callback_data="admin_template_center"), InlineKeyboardButton("🗂 批量任务", callback_data="admin_bulk_jobs")]
+            [InlineKeyboardButton("🧩 模板中心", callback_data="admin_template_center"), InlineKeyboardButton("🗂 批量任务", callback_data="admin_bulk_jobs")],
+            [InlineKeyboardButton("🔎 面板用户检索", callback_data="admin_panel_user_lookup"), InlineKeyboardButton("🖥 系统面板", callback_data="admin_system_dashboard")]
         ]
     else:
         msg_text = "👋 **欢迎使用自助服务！**\n请选择操作："
@@ -1396,6 +1417,66 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回模板中心", callback_data="admin_template_center")], [InlineKeyboardButton("🏠 返回主页", callback_data="back_home")]]),
         )
         return
+    if data == "admin_panel_user_lookup":
+        context.user_data['panel_user_lookup_mode'] = True
+        tip = (
+            "🔎 **面板用户检索/绑定**\n"
+            "请输入以下任一格式：\n"
+            "- `tg:123456789`（按 Telegram ID）\n"
+            "- `username:alice`（按用户名）\n"
+            "- `uuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`\n"
+            "- `short:abcd1234`（短 UUID）\n"
+            "- 或直接输入纯数字（自动按 Telegram ID）。"
+        )
+        kb = [[InlineKeyboardButton("🔙 取消", callback_data="back_home")]]
+        await send_or_edit_menu(update, context, tip, InlineKeyboardMarkup(kb))
+        return
+    if data.startswith("bind_panel_user_"):
+        parts = data.split("_", 4)
+        if len(parts) < 5:
+            await query.answer("参数错误", show_alert=True)
+            return
+        _, _, _, tg_text, panel_uuid = parts
+        try:
+            target_tg_id = int(tg_text)
+        except ValueError:
+            await query.answer("TG ID 格式错误", show_alert=True)
+            return
+        exists = db_query("SELECT 1 FROM subscriptions WHERE tg_id=? AND uuid=? LIMIT 1", (target_tg_id, panel_uuid), one=True)
+        if not exists:
+            db_execute("INSERT INTO subscriptions (tg_id, uuid, created_at) VALUES (?, ?, ?)", (target_tg_id, panel_uuid, int(time.time())))
+        await send_or_edit_menu(
+            update,
+            context,
+            f"✅ 绑定完成\nTG ID: `{target_tg_id}`\nUUID: `{panel_uuid}`",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔎 继续检索", callback_data="admin_panel_user_lookup")], [InlineKeyboardButton("🏠 返回主页", callback_data="back_home")]]),
+        )
+        return
+    if data == "admin_system_dashboard":
+        health = await get_panel_system_health()
+        stats = await get_panel_system_stats()
+        recap = await get_panel_system_stats_recap()
+        lines = ["🖥 **系统面板（基础）**"]
+        if health:
+            lines.append(f"健康信息字段: `{len(health.keys())}` 项")
+            for k in list(health.keys())[:6]:
+                lines.append(f"- {k}: {str(health.get(k))[:60]}")
+        else:
+            lines.append("- ⚠️ 系统健康信息不可用（可能是配置/权限/连通性问题）")
+        if stats:
+            lines.append(f"\n统计字段: `{len(stats.keys())}` 项")
+            for k in list(stats.keys())[:8]:
+                lines.append(f"- {k}: {str(stats.get(k))[:60]}")
+        else:
+            lines.append("\n- ⚠️ /system/stats 不可用")
+        if recap:
+            lines.append(f"\nRecap字段: `{len(recap.keys())}` 项")
+            for k in list(recap.keys())[:6]:
+                lines.append(f"- {k}: {str(recap.get(k))[:60]}")
+        else:
+            lines.append("- ⚠️ /system/stats/recap 不可用")
+        await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+        return
     if data == "admin_bulk_jobs":
         rows = db_query("SELECT * FROM bulk_jobs ORDER BY created_at DESC LIMIT 20")
         lines = ["🗂 **批量任务队列（最近20条）**"]
@@ -1933,7 +2014,49 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         panel_info = await get_panel_user(target_uuid)
         status = "🟢 面板正常" if panel_info else "🔴 面板已删"
-        msg = (f"👤 **用户详情**\nTG ID: `{dict(sub)['tg_id']}`\n状态: {status}\nUUID: `{target_uuid}`")
+        user_nodes, user_nodes_err = [], None
+        if PANEL_URL and PANEL_TOKEN:
+            resp = await safe_api_request('GET', f"/users/{target_uuid}/accessible-nodes")
+            if not resp:
+                user_nodes_err = "network_error"
+            elif resp.status_code == 401:
+                user_nodes_err = "auth_unauthorized"
+            elif resp.status_code == 403:
+                user_nodes_err = "auth_forbidden"
+            elif resp.status_code == 404:
+                user_nodes_err = "endpoint_or_user_not_found"
+            elif resp.status_code == 200:
+                payload = extract_payload(resp)
+                if isinstance(payload, list):
+                    user_nodes = payload
+                elif isinstance(payload, dict):
+                    nodes = payload.get('accessibleNodes')
+                    if isinstance(nodes, list):
+                        user_nodes = nodes
+                    else:
+                        user_nodes_err = "empty_payload"
+                else:
+                    user_nodes_err = "empty_payload"
+            else:
+                user_nodes_err = f"http_{resp.status_code}"
+        else:
+            user_nodes_err = "config_missing"
+        node_lines = ["可访问节点："]
+        if user_nodes:
+            for n in user_nodes[:10]:
+                node_name = n.get('name') or n.get('nodeName') or n.get('remark') or n.get('uuid') or '未知节点'
+                node_lines.append(f"- {node_name}")
+        else:
+            reason_map = {
+                "config_missing": "面板地址或 Token 未配置",
+                "network_error": "面板网络不可达",
+                "auth_unauthorized": "Token 鉴权失败(401)",
+                "auth_forbidden": "Token 权限不足(403)",
+                "endpoint_or_user_not_found": "接口或用户不存在(404)",
+                "empty_payload": "接口返回为空",
+            }
+            node_lines.append(f"- ⚠️ {reason_map.get(user_nodes_err, user_nodes_err or '暂无')}")
+        msg = (f"👤 **用户详情**\nTG ID: `{dict(sub)['tg_id']}`\n状态: {status}\nUUID: `{target_uuid}`\n\n" + "\n".join(node_lines))
         keyboard = [
             [InlineKeyboardButton("🔄 重置流量", callback_data=f"reset_traffic_{target_uuid}")],
             [InlineKeyboardButton("📜 最近请求记录", callback_data=f"user_reqhist_{target_uuid}")],
@@ -2098,6 +2221,60 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_setting_value('usdt_address', text.strip())
         context.user_data.pop('paycfg_input_usdt_address', None)
         await update.message.reply_text("✅ USDT 地址已更新。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_pay_usdt_cfg")]]))
+        return
+
+    if user_id == ADMIN_ID and context.user_data.get('panel_user_lookup_mode') and text:
+        raw = text.strip()
+        lookup_type = "auto"
+        lookup_value = raw
+        if ":" in raw:
+            lookup_type, lookup_value = [x.strip() for x in raw.split(":", 1)]
+            lookup_type = lookup_type.lower()
+        panel_user = None
+        if lookup_type in {"tg", "telegram", "telegram_id", "auto"} and lookup_value.isdigit():
+            panel_user = await get_user_by_telegram_id(int(lookup_value))
+            lookup_type = "telegramId"
+        elif lookup_type in {"username", "user"}:
+            panel_user = await get_user_by_username(lookup_value)
+            lookup_type = "username"
+        elif lookup_type in {"uuid"}:
+            panel_user = await get_panel_user(lookup_value)
+            lookup_type = "uuid"
+        elif lookup_type in {"short", "short_uuid"}:
+            panel_user = await get_user_by_short_uuid(lookup_value)
+            lookup_type = "shortUuid"
+        elif lookup_value.isdigit():
+            panel_user = await get_user_by_telegram_id(int(lookup_value))
+            lookup_type = "telegramId"
+        else:
+            panel_user = await get_user_by_username(lookup_value)
+            lookup_type = "username"
+
+        if not isinstance(panel_user, dict):
+            await update.message.reply_text(
+                "❌ 未找到面板用户，或当前 Token 无权限访问该检索接口。",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔎 继续检索", callback_data="admin_panel_user_lookup")], [InlineKeyboardButton("🏠 返回主页", callback_data="back_home")]]),
+            )
+            return
+
+        puuid = panel_user.get('uuid') or '-'
+        puser = panel_user.get('username') or '-'
+        ptg = panel_user.get('telegramId')
+        pstatus = panel_user.get('status') or '-'
+        pstrategy = panel_user.get('trafficLimitStrategy') or '-'
+        lines = [
+            "✅ 检索到面板用户",
+            f"检索方式: {lookup_type}",
+            f"UUID: {puuid}",
+            f"用户名: {puser}",
+            f"Telegram ID: {ptg if ptg is not None else '-'}",
+            f"状态: {pstatus}",
+            f"重置策略: {pstrategy}",
+        ]
+        kb = [[InlineKeyboardButton("🔎 继续检索", callback_data="admin_panel_user_lookup")], [InlineKeyboardButton("🏠 返回主页", callback_data="back_home")]]
+        if puuid != '-' and isinstance(ptg, int):
+            kb.insert(0, [InlineKeyboardButton("🔗 绑定到本地订阅", callback_data=f"bind_panel_user_{ptg}_{puuid}")])
+        await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
         return
 
     if user_id == ADMIN_ID and context.user_data.get('broadcast_mode'):
@@ -2874,6 +3051,8 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^anomaly_whitelist_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^anomaly_quick_"))
     app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^bulk_"))
+    app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^bind_panel_user_"))
+    app.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^tpl_"))
     app.add_handler(CallbackQueryHandler(add_plan_start, pattern="^add_plan_start$"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^client_"))
     app.add_handler(CallbackQueryHandler(client_menu_handler, pattern="^selrenew_"))
