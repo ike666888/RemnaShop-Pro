@@ -25,14 +25,14 @@ err() {
 
 usage() {
   cat <<USAGE
-Usage:
+用法:
   bash bootstrap.sh install
   bash bootstrap.sh uninstall
-  bash bootstrap.sh              # interactive menu when TTY is available; otherwise defaults to install
+  bash bootstrap.sh              # 有 TTY 时显示交互菜单；否则默认执行 install
 
-Public one-command install:
+公网一键安装:
   curl -fsSL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/bootstrap.sh | bash
-Public one-command uninstall:
+公网一键卸载:
   curl -fsSL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main/bootstrap.sh | bash -s -- uninstall
 USAGE
 }
@@ -68,13 +68,13 @@ pkg_update_if_needed() {
 
   case "${PACKAGE_MANAGER}" in
     apt)
-      log "Refreshing apt package index..."
+      log "正在刷新 apt 软件包索引..."
       ${SUDO} apt-get update -y
       ;;
     dnf|yum)
       ;;
     *)
-      err "No supported package manager found for automatic dependency installation."
+      err "未找到受支持的软件包管理器，无法自动安装依赖。"
       return 1
       ;;
   esac
@@ -99,7 +99,7 @@ install_packages() {
       ${SUDO} yum install -y "$@"
       ;;
     *)
-      err "Cannot install packages automatically: unsupported package manager."
+      err "无法自动安装软件包：当前系统的软件包管理器不受支持。"
       return 1
       ;;
   esac
@@ -110,29 +110,29 @@ ensure_cmd_with_package() {
   local pkg="$2"
 
   if require_cmd "${cmd}"; then
-    log "Dependency check: ${cmd} is available."
+    log "依赖检查：${cmd} 已安装。"
     return 0
   fi
 
-  warn "Dependency missing: ${cmd}. Attempting automatic install (package: ${pkg})."
+  warn "缺少依赖：${cmd}。正在尝试自动安装（软件包：${pkg}）。"
   install_packages "${pkg}"
   if require_cmd "${cmd}"; then
-    log "Dependency installed: ${cmd}."
+    log "依赖安装完成：${cmd}。"
     return 0
   fi
 
-  err "Failed to install dependency '${cmd}' automatically."
+  err "依赖 '${cmd}' 自动安装失败。"
   return 1
 }
 
 install_base_dependencies() {
   detect_package_manager
   if [ -z "${PACKAGE_MANAGER}" ]; then
-    err "Unsupported system: requires apt, dnf, or yum for automatic dependency installation."
+    err "当前系统不受支持：自动安装依赖仅支持 apt、dnf 或 yum。"
     exit 1
   fi
 
-  log "Checking common base dependencies for bootstrap."
+  log "正在检查并准备 bootstrap 所需基础依赖。"
   ensure_cmd_with_package bash bash
   ensure_cmd_with_package tar tar
   ensure_cmd_with_package gzip gzip
@@ -149,40 +149,40 @@ install_base_dependencies() {
     warn "Dependency missing: ca-certificates. Attempting automatic install."
     install_packages ca-certificates
     if ! require_cmd update-ca-certificates; then
-      err "Failed to install ca-certificates automatically."
+      err "ca-certificates 自动安装失败。"
       exit 1
     fi
   else
-    log "Dependency check: ca-certificates is available."
+    log "依赖检查：ca-certificates 已安装。"
   fi
 }
 
 install_docker() {
   if require_cmd docker; then
-    log "Docker already installed: $(docker --version)"
+    log "Docker 已安装：$(docker --version)"
     return
   fi
 
-  log "Docker not found, installing Docker..."
+  log "未检测到 Docker，开始安装..."
   curl -fsSL https://get.docker.com | sh
   ${SUDO} systemctl enable docker >/dev/null 2>&1 || true
   ${SUDO} systemctl start docker >/dev/null 2>&1 || true
 
   if ! require_cmd docker; then
-    err "Docker installation failed."
+    err "Docker 安装失败。"
     exit 1
   fi
 
-  log "Docker installed: $(docker --version)"
+  log "Docker 安装完成：$(docker --version)"
 }
 
 install_docker_compose() {
   if docker compose version >/dev/null 2>&1; then
-    log "Docker Compose already available: $(docker compose version | head -n 1)"
+    log "Docker Compose 已可用：$(docker compose version | head -n 1)"
     return
   fi
 
-  log "Docker Compose plugin not found, installing..."
+  log "未检测到 Docker Compose 插件，开始安装..."
 
   if require_cmd apt-get; then
     ${SUDO} apt-get update -y
@@ -192,30 +192,30 @@ install_docker_compose() {
   elif require_cmd yum; then
     ${SUDO} yum install -y docker-compose-plugin
   else
-    err "Unsupported package manager. Please install Docker Compose plugin manually."
+    err "当前软件包管理器不受支持，请手动安装 Docker Compose 插件。"
     exit 1
   fi
 
   if ! docker compose version >/dev/null 2>&1; then
-    err "Docker Compose installation failed."
+    err "Docker Compose 安装失败。"
     exit 1
   fi
 
-  log "Docker Compose installed: $(docker compose version | head -n 1)"
+  log "Docker Compose 安装完成：$(docker compose version | head -n 1)"
 }
 
 prepare_repo() {
-  log "Preparing repository at ${INSTALL_DIR}"
+  log "正在准备仓库目录：${INSTALL_DIR}"
 
   if [ -d "${INSTALL_DIR}/.git" ]; then
-    log "Existing git repository detected, updating..."
+    log "检测到已有 git 仓库，正在更新..."
     git -C "${INSTALL_DIR}" fetch origin
     git -C "${INSTALL_DIR}" checkout "${BRANCH}"
     git -C "${INSTALL_DIR}" pull --ff-only origin "${BRANCH}"
   else
     ${SUDO} mkdir -p "$(dirname "${INSTALL_DIR}")"
     if [ -d "${INSTALL_DIR}" ]; then
-      warn "${INSTALL_DIR} exists but is not a git repository. Removing it to avoid conflicts."
+      warn "${INSTALL_DIR} 已存在但不是 git 仓库。为避免冲突将先删除该目录。"
       ${SUDO} rm -rf "${INSTALL_DIR}"
     fi
     git clone --branch "${BRANCH}" --depth 1 "${REPO_URL}" "${INSTALL_DIR}"
@@ -227,12 +227,11 @@ prepare_env() {
 
   if [ ! -f .env ] && [ -f .env.example ]; then
     cp .env.example .env
-    log "Created .env from .env.example"
-    warn "Please edit ${INSTALL_DIR}/.env and set at least ADMIN_ID and BOT_TOKEN"
+    log "已根据 .env.example 创建 .env"
   elif [ -f .env ]; then
-    log ".env already exists, keeping current values"
+    log ".env 已存在，将保留现有配置并仅处理必填项。"
   else
-    err "Missing .env.example, cannot prepare environment file."
+    err "缺少 .env.example，无法初始化环境变量文件。"
     exit 1
   fi
 }
@@ -260,8 +259,8 @@ upsert_env_value() {
 
 prompt_required_env() {
   if [ ! -r /dev/tty ]; then
-    err "Interactive input is required to set ADMIN_ID and BOT_TOKEN, but no TTY is available."
-    err "Run with a terminal (for example: curl -fsSL <raw-script-url> | bash), or preconfigure ${INSTALL_DIR}/.env before install."
+    err "设置 ADMIN_ID 和 BOT_TOKEN 需要交互输入，但当前没有可用的 TTY。"
+    err "请在终端中运行（例如：curl -fsSL <raw-script-url> | bash），或先在 ${INSTALL_DIR}/.env 中预设这两个变量。"
     exit 1
   fi
 
@@ -270,77 +269,77 @@ prompt_required_env() {
   bot_current="$(get_env_value "BOT_TOKEN")"
 
   echo
-  log "Configure required environment values."
+  log "正在配置必填环境变量（仅 ADMIN_ID 与 BOT_TOKEN）。"
 
   if [ -n "${admin_current}" ]; then
-    printf "Existing ADMIN_ID='%s'. Keep it? [Y/n]: " "${admin_current}" >/dev/tty
+    printf "检测到现有 ADMIN_ID='%s'，是否保留？[Y/n]: " "${admin_current}" >/dev/tty
     read -r keep </dev/tty
     if [[ ! "${keep:-Y}" =~ ^[Yy]$ ]]; then
       while true; do
-        printf "Enter ADMIN_ID: " >/dev/tty
+        printf "请输入 ADMIN_ID: " >/dev/tty
         read -r admin_new </dev/tty
         if [ -n "${admin_new}" ]; then
           upsert_env_value "ADMIN_ID" "${admin_new}"
           break
         fi
-        warn "ADMIN_ID cannot be empty."
+        warn "ADMIN_ID 不能为空。"
       done
     fi
   else
     while true; do
-      printf "Enter ADMIN_ID: " >/dev/tty
+      printf "请输入 ADMIN_ID: " >/dev/tty
       read -r admin_new </dev/tty
       if [ -n "${admin_new}" ]; then
         upsert_env_value "ADMIN_ID" "${admin_new}"
         break
       fi
-      warn "ADMIN_ID cannot be empty."
+      warn "ADMIN_ID 不能为空。"
     done
   fi
 
   if [ -n "${bot_current}" ]; then
-    printf "Existing BOT_TOKEN='%s'. Keep it? [Y/n]: " "${bot_current}" >/dev/tty
+    printf "检测到现有 BOT_TOKEN='%s'，是否保留？[Y/n]: " "${bot_current}" >/dev/tty
     read -r keep </dev/tty
     if [[ ! "${keep:-Y}" =~ ^[Yy]$ ]]; then
       while true; do
-        printf "Enter BOT_TOKEN: " >/dev/tty
+        printf "请输入 BOT_TOKEN: " >/dev/tty
         read -r bot_new </dev/tty
         if [ -n "${bot_new}" ]; then
           upsert_env_value "BOT_TOKEN" "${bot_new}"
           break
         fi
-        warn "BOT_TOKEN cannot be empty."
+        warn "BOT_TOKEN 不能为空。"
       done
     fi
   else
     while true; do
-      printf "Enter BOT_TOKEN: " >/dev/tty
+      printf "请输入 BOT_TOKEN: " >/dev/tty
       read -r bot_new </dev/tty
       if [ -n "${bot_new}" ]; then
         upsert_env_value "BOT_TOKEN" "${bot_new}"
         break
       fi
-      warn "BOT_TOKEN cannot be empty."
+      warn "BOT_TOKEN 不能为空。"
     done
   fi
 
   if [ -z "$(get_env_value "ADMIN_ID")" ] || [ -z "$(get_env_value "BOT_TOKEN")" ]; then
-    err "ADMIN_ID and BOT_TOKEN must both be set in ${INSTALL_DIR}/.env."
+    err "${INSTALL_DIR}/.env 中必须同时设置 ADMIN_ID 和 BOT_TOKEN。"
     exit 1
   fi
 }
 
 start_stack() {
   cd "${INSTALL_DIR}"
-  log "Starting Docker Compose stack..."
+  log "正在启动 Docker Compose 服务栈..."
   docker compose -p "${PROJECT_NAME}" up -d --build
 }
 
 print_failure_hint() {
   cat <<MSG
 
-❌ Install failed: remnashop container did not become healthy.
-Troubleshooting:
+❌ 安装失败：remnashop 容器未进入 healthy 状态。
+排查建议：
   cd ${INSTALL_DIR}
   docker compose -p ${PROJECT_NAME} ps
   docker compose -p ${PROJECT_NAME} logs --tail=200 remnashop
@@ -359,7 +358,7 @@ wait_for_health() {
   while [ "${elapsed}" -lt "${timeout}" ]; do
     container_id="$(docker compose -p "${PROJECT_NAME}" ps -q remnashop || true)"
     if [ -z "${container_id}" ]; then
-      err "remnashop container not found."
+      err "未找到 remnashop 容器。"
       print_failure_hint
       return 1
     fi
@@ -369,22 +368,22 @@ wait_for_health() {
     restart_count="$(docker inspect --format='{{.RestartCount}}' "${container_id}" 2>/dev/null || echo "0")"
 
     if [ "${state}" = "running" ] && [ "${health}" = "healthy" ]; then
-      log "remnashop container is healthy."
+      log "remnashop 容器已进入 healthy 状态。"
       return 0
     fi
 
     if [ "${state}" = "exited" ] || [ "${state}" = "dead" ] || [ "${health}" = "unhealthy" ] || [ "${state}" = "restarting" ] || [ "${restart_count}" -gt 3 ]; then
-      err "Container state indicates failure (state=${state}, health=${health}, restarts=${restart_count})."
+      err "容器状态异常，判定安装失败（state=${state}, health=${health}, restarts=${restart_count}）。"
       print_failure_hint
       return 1
     fi
 
-    echo "[wait] remnashop state=${state}, health=${health}, restarts=${restart_count} (${elapsed}s/${timeout}s)"
+    echo "[等待中] remnashop state=${state}, health=${health}, restarts=${restart_count} (${elapsed}s/${timeout}s)"
     sleep "${interval}"
     elapsed=$((elapsed + interval))
   done
 
-  err "Timed out after ${timeout}s waiting for healthy remnashop container."
+  err "等待超时：${timeout}s 内 remnashop 容器仍未达到 healthy。"
   print_failure_hint
   return 1
 }
@@ -392,93 +391,95 @@ wait_for_health() {
 verify_stack() {
   cd "${INSTALL_DIR}"
 
-  log "Verification: Docker"
+  log "校验：Docker"
   docker --version
 
-  log "Verification: Docker Compose"
+  log "校验：Docker Compose"
   docker compose version
 
-  log "Verification: environment file"
+  log "校验：环境变量文件"
   if [ -f .env ]; then
     echo "[ok] ${INSTALL_DIR}/.env exists"
   else
-    err ".env file does not exist"
+    err ".env 文件不存在"
     exit 1
   fi
 
-  log "Verification: stack status"
+  log "校验：服务栈状态"
   docker compose -p "${PROJECT_NAME}" ps
 
-  log "Verification: service health"
+  log "校验：服务健康状态"
   container_id="$(docker compose -p "${PROJECT_NAME}" ps -q remnashop || true)"
   if [ -n "${container_id}" ]; then
     health="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "${container_id}")"
     echo "[ok] remnashop container health: ${health}"
   else
-    err "remnashop container not found"
+    err "未找到 remnashop 容器"
     exit 1
   fi
 }
 
 uninstall_stack() {
   if ! require_cmd docker; then
-    warn "Docker not found, skipping container/image/volume cleanup."
+    warn "未检测到 Docker，跳过容器/镜像/数据卷清理。"
     return
   fi
 
   if [ -f "${INSTALL_DIR}/docker-compose.yml" ]; then
-    log "Stopping and removing RemnaShop-Pro compose stack..."
+    log "正在停止并删除 RemnaShop-Pro 的 Compose 服务栈..."
     docker compose -f "${INSTALL_DIR}/docker-compose.yml" -p "${PROJECT_NAME}" down -v --rmi local --remove-orphans || true
   else
-    warn "Compose file not found at ${INSTALL_DIR}/docker-compose.yml, trying label-based cleanup only."
+    warn "未找到 ${INSTALL_DIR}/docker-compose.yml，将仅尝试按项目标签清理。"
   fi
 
   local ids
   ids="$(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT_NAME}" || true)"
   if [ -n "${ids}" ]; then
-    log "Removing leftover containers labeled for project ${PROJECT_NAME}"
+    log "正在清理项目 ${PROJECT_NAME} 的残留容器。"
     docker rm -f ${ids} || true
   fi
 
   local volume_ids
   volume_ids="$(docker volume ls -q --filter "label=com.docker.compose.project=${PROJECT_NAME}" || true)"
   if [ -n "${volume_ids}" ]; then
-    log "Removing leftover volumes labeled for project ${PROJECT_NAME}"
+    log "正在清理项目 ${PROJECT_NAME} 的残留数据卷。"
     docker volume rm ${volume_ids} || true
   fi
 
   local image_ids
   image_ids="$(docker image ls -q --filter "label=com.docker.compose.project=${PROJECT_NAME}" || true)"
   if [ -n "${image_ids}" ]; then
-    log "Removing leftover images labeled for project ${PROJECT_NAME}"
+    log "正在清理项目 ${PROJECT_NAME} 的残留镜像。"
     docker image rm ${image_ids} || true
   fi
 }
 
 remove_project_directory() {
   if [ -d "${INSTALL_DIR}" ]; then
-    log "Removing project directory: ${INSTALL_DIR}"
+    log "正在删除项目目录：${INSTALL_DIR}"
     ${SUDO} rm -rf "${INSTALL_DIR}"
   else
-    warn "Project directory not found: ${INSTALL_DIR} (already removed)"
+    warn "项目目录不存在：${INSTALL_DIR}（可能已被删除）"
   fi
 }
 
 confirm_uninstall_if_needed() {
   if [ ! -r /dev/tty ]; then
-    warn "No interactive TTY detected; proceeding without confirmation prompt."
+    warn "未检测到交互式 TTY，将直接继续卸载（仅影响 RemnaShop-Pro 项目资源）。"
     return
   fi
 
   echo
-  warn "This will remove ONLY RemnaShop-Pro resources:"
-  warn "- compose project: ${PROJECT_NAME}"
-  warn "- containers/images/volumes created by this project"
-  warn "- directory: ${INSTALL_DIR}"
-  printf "Type 'YES' to confirm uninstall: " >/dev/tty
+  warn "即将删除（仅限 RemnaShop-Pro 资源）："
+  warn "- Compose 项目：${PROJECT_NAME}"
+  warn "- 该项目创建的容器/镜像/数据卷"
+  warn "- 项目目录：${INSTALL_DIR}"
+  printf "请输入确认（YES/yes/Y/y）以继续卸载，其他任意输入将取消: " >/dev/tty
   read -r confirm </dev/tty
-  if [ "${confirm}" != "YES" ]; then
-    log "Uninstall canceled."
+  confirm="$(printf '%s' "${confirm}" | tr -d '[:space:]')"
+  confirm="$(printf '%s' "${confirm}" | tr '[:upper:]' '[:lower:]')"
+  if [ "${confirm}" != "yes" ] && [ "${confirm}" != "y" ]; then
+    log "已取消卸载。"
     exit 0
   fi
 }
@@ -496,13 +497,13 @@ install_flow() {
 
   cat <<MSG
 
-✅ RemnaShop-Pro install completed.
+✅ RemnaShop-Pro 安装完成。
 
 Install directory: ${INSTALL_DIR}
-Success criteria met:
+成功判定条件已满足：
   - docker compose up completed
   - remnashop container reached health=healthy
-Next steps:
+后续可执行：
   1) Check status: cd ${INSTALL_DIR} && docker compose -p ${PROJECT_NAME} ps
   2) Check logs:   cd ${INSTALL_DIR} && docker compose -p ${PROJECT_NAME} logs -f remnashop
 
@@ -516,24 +517,24 @@ uninstall_flow() {
 
   cat <<MSG
 
-✅ RemnaShop-Pro uninstall completed.
-Only project '${PROJECT_NAME}' resources were targeted.
+✅ RemnaShop-Pro 卸载完成。
+仅处理了项目 '${PROJECT_NAME}' 相关资源。
 
 MSG
 }
 
 show_menu() {
   echo
-  echo "RemnaShop-Pro Bootstrap"
-  echo "1) Install"
-  echo "2) Uninstall"
-  echo "0) Exit"
-  read -r -p "Choose [0-2]: " choice
+  echo "RemnaShop-Pro 引导脚本"
+  echo "1) 安装"
+  echo "2) 卸载"
+  echo "0) 退出"
+  read -r -p "请选择 [0-2]: " choice
   case "${choice}" in
     1) ACTION="install" ;;
     2) ACTION="uninstall" ;;
     0) exit 0 ;;
-    *) err "Invalid selection"; exit 1 ;;
+    *) err "无效选择"; exit 1 ;;
   esac
 }
 
@@ -550,7 +551,7 @@ select_action() {
         show_menu
       else
         ACTION="install"
-        log "No action provided in non-interactive mode; defaulting to install."
+        log "非交互模式未指定动作，默认执行 install。"
       fi
       ;;
     -h|--help|help)
@@ -558,7 +559,7 @@ select_action() {
       exit 0
       ;;
     *)
-      err "Unknown action: ${ACTION}"
+      err "未知动作：${ACTION}"
       usage
       exit 1
       ;;
