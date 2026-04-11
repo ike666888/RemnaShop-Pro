@@ -112,6 +112,22 @@ async def get_user_by_telegram_id(telegram_id, panel_url, headers, verify_tls=Tr
     return None
 
 
+async def get_user_by_username(username, panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', f"/users/by-username/{username}", panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
+async def get_user_by_short_uuid(short_uuid, panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', f"/users/by-short-uuid/{short_uuid}", panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
 async def get_nodes_status(panel_url, headers, verify_tls=True):
     resp = await safe_api_request('GET', '/nodes', panel_url, headers, verify_tls)
     if resp and resp.status_code == 200:
@@ -304,6 +320,22 @@ async def get_system_health(panel_url, headers, verify_tls=True):
     return {}
 
 
+async def get_system_stats(panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', '/system/stats', panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+async def get_system_stats_recap(panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', '/system/stats/recap', panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
 async def get_snippet_by_key(key: str, panel_url, headers, verify_tls=True):
     candidates = [
         ('GET', f'/snippets/{key}'),
@@ -344,4 +376,16 @@ async def get_config_profiles(panel_url, headers, verify_tls=True):
     if resp and resp.status_code == 200:
         payload = extract_payload(resp)
         return payload if isinstance(payload, list) else []
+    return []
+
+
+async def get_user_accessible_nodes(uuid, panel_url, headers, verify_tls=True):
+    resp = await safe_api_request('GET', f'/users/{uuid}/accessible-nodes', panel_url, headers, verify_tls)
+    if resp and resp.status_code == 200:
+        payload = extract_payload(resp)
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            nodes = payload.get('accessibleNodes')
+            return nodes if isinstance(nodes, list) else []
     return []
