@@ -183,7 +183,7 @@ def capability_enabled(name: str, default=False):
         return str(explicit).strip().lower() in {"1", "true", "yes", "on", "开启", "开"}
     return bool(panel_capabilities_cache.get(key, default))
 
-def get_plan_price(plan_dict, payment_method='alipay'):
+def get_plan_price(plan_dict, payment_method='manual_review'):
     if payment_method == 'usdt':
         usdt_price = (plan_dict.get('usdt_price') or '').strip()
         if usdt_price:
@@ -191,31 +191,9 @@ def get_plan_price(plan_dict, payment_method='alipay'):
     return str(plan_dict.get('price') or '')
 
 def resolve_payment_state(payment_method):
-    alipay_enabled = get_setting_bool("alipay_enabled", True)
-    wechat_enabled = get_setting_bool("wechat_enabled", True)
     usdt_enabled = get_setting_bool("usdt_enabled", False)
-    alipay_token_enabled = get_setting_bool("alipay_token_enabled", True)
-    alipay_qr_enabled = get_setting_bool("alipay_qr_enabled", True)
-
-    if payment_method == "alipay":
-        method_label = "支付宝"
-        qr_file_id = get_setting_value("alipay_qr_file_id")
-        custom_tip = dynamic_snippets_cache.get("payment_alipay_tip", "")
-        if not alipay_enabled:
-            return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "管理员未配置收款，请等待管理配置收款。"}
-        if alipay_token_enabled:
-            return {'available': True, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': custom_tip or "请在下方直接发送 **支付宝口令红包**（文字）给机器人。"}
-        if alipay_qr_enabled and qr_file_id:
-            return {'available': True, 'method_label': method_label, 'should_send_qr': True, 'qr_file_id': qr_file_id, 'pay_tip': custom_tip or "请按下方支付宝收款码完成付款后，发送 **支付截图/备注** 给机器人。"}
-        return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "管理员未配置收款，请等待管理配置收款。"}
-
-    if payment_method == "wechat":
-        method_label = "微信支付"
-        qr_file_id = get_setting_value("wechat_qr_file_id")
-        custom_tip = dynamic_snippets_cache.get("payment_wechat_tip", "")
-        if wechat_enabled and qr_file_id:
-            return {'available': True, 'method_label': method_label, 'should_send_qr': True, 'qr_file_id': qr_file_id, 'pay_tip': custom_tip or "请按下方微信收款码完成付款后，发送 **支付截图/备注** 给机器人。"}
-        return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "管理员未配置收款，请等待管理配置收款。"}
+    if payment_method == "manual_review":
+        return {'available': True, 'method_label': "人工审核", 'should_send_qr': False, 'qr_file_id': None, 'pay_tip': "提交凭证后由管理员人工审核。"}
 
     if payment_method == "usdt":
         method_label = "USDT"
@@ -230,10 +208,9 @@ def resolve_payment_state(payment_method):
 
     return {'available': False, 'method_label': payment_method, 'should_send_qr': False, 'qr_file_id': None, 'pay_tip': "不支持的支付方式。"}
 def is_any_payment_available():
-    ali = resolve_payment_state('alipay')['available']
-    wx = resolve_payment_state('wechat')['available']
+    manual_review = resolve_payment_state('manual_review')['available']
     usdt = resolve_payment_state('usdt')['available']
-    return ali or wx or usdt
+    return manual_review or usdt
 
 
 def get_json_setting(key, default):
@@ -560,7 +537,7 @@ async def refresh_panel_capabilities():
 
 async def refresh_dynamic_snippets():
     global dynamic_snippets_cache
-    keys = ["payment_alipay_tip", "payment_wechat_tip", "payment_usdt_tip", "support_contact_tip"]
+    keys = ["payment_usdt_tip", "support_contact_tip"]
     rows = {}
     for key in keys:
         payload = await get_panel_snippet(key)
@@ -1148,7 +1125,7 @@ async def cleanup_panelcfg_prompt_message(context: ContextTypes.DEFAULT_TYPE, ch
         logger.debug("failed to cleanup panelcfg prompt message %s: %s", msg_id, exc)
 
 
-async def handle_order_confirmation(update, context, plan_key, order_type, short_id, payment_method='alipay'):
+async def handle_order_confirmation(update, context, plan_key, order_type, short_id, payment_method='manual_review'):
     user_id = update.effective_user.id
     target_uuid = get_real_uuid(short_id) if short_id != "0" else "0"
 
@@ -1504,14 +1481,6 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
         return
 
-    if data == "admin_pay_alipay_cfg":
-        await send_or_edit_menu(update, context, "⚠️ 支付宝配置已下线，当前仅保留：人工审核 + USDT。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
-        return
-
-    if data == "admin_pay_wechat_cfg":
-        await send_or_edit_menu(update, context, "⚠️ 微信配置已下线，当前仅保留：人工审核 + USDT。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
-        return
-
     if data == "admin_pay_usdt_cfg":
         usdt_enabled = get_setting_bool("usdt_enabled", False)
         usdt_network = (get_setting_value("usdt_network", "TRC20") or "TRC20").strip().upper()
@@ -1551,22 +1520,6 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_or_edit_menu(update, context, "✍️ 请输入 USDT 收款地址", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_pay_usdt_cfg")]]))
         return
 
-    if data == "toggle_pay_alipay":
-        await send_or_edit_menu(update, context, "⚠️ 支付宝配置已下线。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
-        return
-
-    if data == "toggle_pay_alipay_token":
-        await send_or_edit_menu(update, context, "⚠️ 支付宝配置已下线。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
-        return
-
-    if data == "toggle_pay_alipay_qr":
-        await send_or_edit_menu(update, context, "⚠️ 支付宝配置已下线。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
-        return
-
-    if data == "toggle_pay_wechat":
-        await send_or_edit_menu(update, context, "⚠️ 微信配置已下线。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
-        return
-
     if data == "admin_pay_self_check":
         usdt_enabled = get_setting_bool("usdt_enabled", False)
         usdt_address_ready = bool((get_setting_value("usdt_address", "") or '').strip())
@@ -1600,13 +1553,9 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup(kb))
         return
 
-    if data in {"set_payimg_alipay", "set_payimg_wechat", "set_payimg_usdt"}:
-        if data.endswith('alipay') or data.endswith('wechat'):
-            await send_or_edit_menu(update, context, "⚠️ 支付宝/微信配置已下线。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回收款设置", callback_data="admin_pay_settings")]]))
-            return
-        else:
-            context.user_data['set_payimg'] = 'usdt'
-            back_cb = "admin_pay_usdt_cfg"
+    if data == "set_payimg_usdt":
+        context.user_data['set_payimg'] = 'usdt'
+        back_cb = "admin_pay_usdt_cfg"
         await send_or_edit_menu(update, context, "📷 请发送收款二维码图片（可发送照片或图片文件）", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data=back_cb)]]))
         return
 
