@@ -64,7 +64,10 @@ def format_order_row(item: dict) -> str:
         '失败': '❌',
         '已拒绝': '⛔',
     }.get(status, '📄')
-    return f"{icon} {status} | {item['order_id']} | {item['tg_id']} | {ts}"
+    return (
+        f"{icon} {status} | {item['order_id']} | {item['tg_id']} | "
+        f"{item.get('plan_key')}/{item.get('order_type')} | {ts}"
+    )
 
 
 def format_order_detail(item: dict, logs: list[dict]) -> str:
@@ -84,6 +87,8 @@ def format_order_detail(item: dict, logs: list[dict]) -> str:
         f"状态: `{order_status_label(item['status'])}`\n"
         f"类型: `{order_type_label(item['order_type'])}`\n"
         f"套餐: `{item['plan_key']}`\n"
+        f"目标UUID: `{item.get('target_uuid') or '0'}`\n"
+        f"渠道码: `{item.get('channel_code') or '-'}`\n"
         f"失败原因: `{err}`\n"
         f"创建时间: `{created}`\n\n"
         f"最近审计:\n" + ("\n".join(log_lines) if log_lines else "- 无")

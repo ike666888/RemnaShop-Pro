@@ -34,13 +34,30 @@ def classify_order_failure(error_text: str) -> str:
 
 
 def create_order(db_query, db_execute, tg_id, plan_key, order_type, target_uuid, menu_message_id=None, channel_code=None):
+    normalized_target_uuid = str(target_uuid or "0")
+    normalized_channel_code = str(channel_code or "")
     existing = db_query(
-        "SELECT * FROM orders WHERE tg_id=? AND status=? ORDER BY created_at DESC LIMIT 1",
-        (tg_id, STATUS_PENDING),
+        """SELECT * FROM orders
+        WHERE tg_id=?
+          AND status=?
+          AND plan_key=?
+          AND order_type=?
+          AND target_uuid=?
+          AND COALESCE(channel_code, '')=?
+        ORDER BY created_at DESC LIMIT 1""",
+        (tg_id, STATUS_PENDING, plan_key, order_type, normalized_target_uuid, normalized_channel_code),
         one=True,
     )
     if existing:
-        logger.info("reusing pending order for tg_id=%s order_id=%s", tg_id, existing["order_id"])
+        logger.info(
+            "reusing pending order for tg_id=%s order_id=%s plan=%s type=%s target_uuid=%s channel=%s",
+            tg_id,
+            existing["order_id"],
+            plan_key,
+            order_type,
+            normalized_target_uuid,
+            normalized_channel_code or "-",
+        )
         return dict(existing), False
 
     now = int(time.time())
@@ -49,7 +66,7 @@ def create_order(db_query, db_execute, tg_id, plan_key, order_type, target_uuid,
         """INSERT INTO orders
         (order_id, tg_id, plan_key, order_type, target_uuid, status, menu_message_id, channel_code, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (order_id, tg_id, plan_key, order_type, target_uuid, STATUS_PENDING, menu_message_id, channel_code, now, now),
+        (order_id, tg_id, plan_key, order_type, normalized_target_uuid, STATUS_PENDING, menu_message_id, channel_code, now, now),
     )
     created = db_query("SELECT * FROM orders WHERE order_id=?", (order_id,), one=True)
     logger.info("created order order_id=%s tg_id=%s type=%s", order_id, tg_id, order_type)
