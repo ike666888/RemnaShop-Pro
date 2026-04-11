@@ -50,6 +50,55 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ike666888/RemnaShop-Pro/main
 
 ---
 
+## Docker Compose 部署
+
+### 1) 准备配置目录
+
+```bash
+mkdir -p data
+```
+
+可选两种方式：
+
+- **方式 A（推荐）**：手动创建 `data/config.json`。
+- **方式 B**：不提供 `config.json`，在 `docker-compose.yml` 里填写 `ADMIN_ID`、`BOT_TOKEN` 等环境变量，容器首次启动会自动生成配置。
+
+示例 `data/config.json`：
+
+```json
+{
+  "admin_id": "123456789",
+  "bot_token": "123456:ABCDEF",
+  "panel_url": "https://panel.example.com",
+  "panel_token": "your_panel_api_token",
+  "sub_domain": "https://sub.example.com",
+  "group_uuid": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "panel_verify_tls": true
+}
+```
+
+### 2) 启动
+
+```bash
+docker compose up -d --build
+```
+
+### 3) 查看日志
+
+```bash
+docker compose logs -f remnashop
+```
+
+### 4) 停止
+
+```bash
+docker compose down
+```
+
+> 数据持久化说明：`./data` 会映射到容器 `/data`，其中 `config.json` 与 `starlight.db` 会持久保存。
+
+---
+
 ## 配置文件
 
 配置文件路径：`/opt/RemnaShop/config.json`

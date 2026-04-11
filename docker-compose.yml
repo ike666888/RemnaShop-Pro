@@ -1,0 +1,19 @@
+services:
+  remnashop:
+    build: .
+    container_name: remnashop-pro
+    restart: always
+    environment:
+      TZ: Asia/Shanghai
+      REMNASHOP_CONFIG: /data/config.json
+      REMNASHOP_DB: /data/starlight.db
+      # 可选：首次启动自动生成 config.json（未挂载配置文件时）
+      # ADMIN_ID: "123456789"
+      # BOT_TOKEN: "123456:ABCDEF"
+      # PANEL_URL: "https://panel.example.com"
+      # PANEL_TOKEN: "your_panel_api_token"
+      # SUB_DOMAIN: "https://sub.example.com"
+      # GROUP_UUID: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+      # PANEL_VERIFY_TLS: "true"
+    volumes:
+      - ./data:/data

@@ -35,8 +35,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
-DB_FILE = os.path.join(BASE_DIR, 'starlight.db')
+CONFIG_FILE = os.getenv("REMNASHOP_CONFIG", os.path.join(BASE_DIR, 'config.json'))
+DB_FILE = os.getenv("REMNASHOP_DB", os.path.join(BASE_DIR, 'starlight.db'))
 
 ANOMALY_IP_THRESHOLD = 50
 
